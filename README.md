@@ -44,6 +44,22 @@ python -m stock_trading.cli run-daily --start 2025-01-01 --equity 10000
 The pipeline ingests bars for those symbols, screens them, and stores generated
 signals with entry, stop, target, share count, risk, status, and expiry values.
 
+## Docker Image CI
+
+GitHub Actions builds and pushes a Docker image on pushes to `main` after tests
+pass. Add these repository secrets in GitHub:
+
+- `DOCKERHUB_USERNAME`
+- `DOCKERHUB_TOKEN`
+
+The workflow pushes:
+
+```text
+DOCKERHUB_USERNAME/stock-trading:latest
+DOCKERHUB_USERNAME/stock-trading:main
+DOCKERHUB_USERNAME/stock-trading:sha-<commit>
+```
+
 ## Commands
 
 ```bash
