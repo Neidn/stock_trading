@@ -60,6 +60,10 @@ DOCKERHUB_USERNAME/stock-trading:main
 DOCKERHUB_USERNAME/stock-trading:sha-<commit>
 ```
 
+For `DOCKERHUB_USERNAME`, use your Docker Hub username or namespace, not your
+email address. For `DOCKERHUB_TOKEN`, paste only the raw access-token value, not
+the token name, `Bearer ...`, quotes, or extra lines.
+
 ## Commands
 
 ```bash
