@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "stock-trading"
+version = "0.1.0"
+description = "Manual-watchlist stock screener and strategy signal system"
+requires-python = ">=3.11"
+dependencies = [
+  "pandas>=2.2",
+  "PyYAML>=6.0",
+  "yfinance>=0.2",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+]
+
+[project.scripts]
+stock-trading = "stock_trading.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
