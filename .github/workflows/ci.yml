@@ -30,6 +30,9 @@ jobs:
     runs-on: ubuntu-latest
     needs: test
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    env:
+      DOCKERHUB_NAMESPACE: neidn
+      DOCKER_IMAGE: neidn/stock-trading
 
     steps:
       - name: Check out repository
@@ -40,28 +43,12 @@ jobs:
 
       - name: Validate Docker Hub secrets
         env:
-          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
           DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
         run: |
           set -euo pipefail
 
-          if [ -z "${DOCKERHUB_USERNAME}" ]; then
-            echo "::error::DOCKERHUB_USERNAME is empty or missing"
-            exit 1
-          fi
-
           if [ -z "${DOCKERHUB_TOKEN}" ]; then
             echo "::error::DOCKERHUB_TOKEN is empty or missing"
-            exit 1
-          fi
-
-          if [[ "${DOCKERHUB_USERNAME}" == *"@"* ]]; then
-            echo "::error::DOCKERHUB_USERNAME must be your Docker Hub username or namespace, not an email address"
-            exit 1
-          fi
-
-          if printf '%s' "${DOCKERHUB_USERNAME}" | grep -q '[[:space:]]'; then
-            echo "::error::DOCKERHUB_USERNAME contains whitespace"
             exit 1
           fi
 
@@ -71,17 +58,16 @@ jobs:
           fi
 
       - name: Log in to Docker Hub
-        uses: docker/login-action@v4
+        uses: docker/login-action@v3
         with:
-          registry: docker.io
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          username: ${{ env.DOCKERHUB_NAMESPACE }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Extract Docker metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ secrets.DOCKERHUB_USERNAME }}/stock-trading
+          images: ${{ env.DOCKER_IMAGE }}
           tags: |
             type=raw,value=latest
             type=ref,event=branch

@@ -49,20 +49,18 @@ signals with entry, stop, target, share count, risk, status, and expiry values.
 GitHub Actions builds and pushes a Docker image on pushes to `main` after tests
 pass. Add these repository secrets in GitHub:
 
-- `DOCKERHUB_USERNAME`
 - `DOCKERHUB_TOKEN`
 
 The workflow pushes:
 
 ```text
-DOCKERHUB_USERNAME/stock-trading:latest
-DOCKERHUB_USERNAME/stock-trading:main
-DOCKERHUB_USERNAME/stock-trading:sha-<commit>
+neidn/stock-trading:latest
+neidn/stock-trading:main
+neidn/stock-trading:sha-<commit>
 ```
 
-For `DOCKERHUB_USERNAME`, use your Docker Hub username or namespace, not your
-email address. For `DOCKERHUB_TOKEN`, paste only the raw access-token value, not
-the token name, `Bearer ...`, quotes, or extra lines.
+For `DOCKERHUB_TOKEN`, paste only the raw access-token value, not the token name,
+`Bearer ...`, quotes, or extra lines.
 
 ## Commands
 
