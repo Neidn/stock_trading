@@ -258,7 +258,6 @@ class KISClient:
         hts_avls = _f(raw, "hts_avls")
         open_price = _f(raw, "stck_oprc")
         prev_close = _f(raw, "stck_sdpr")
-
         # hts_avls is in 억원; convert to 원
         market_cap = hts_avls * 100_000_000 if hts_avls else 0.0
 
@@ -274,7 +273,7 @@ class KISClient:
             volume=volume,
             trade_amount=trade_amount,
             is_halted=raw.get("temp_stop_yn", "N") == "Y",
-            is_admin=bool(raw.get("mang_issu_cls_code", "").strip()),
+            is_admin=False,  # ranking API already excludes 관리종목 via fid_trgt_exls_cls_code
             is_liquidation=raw.get("sltr_yn", "N") == "Y",
         )
 
