@@ -4,10 +4,12 @@ on:
   push:
     paths:
       - "kr/**"
+      - "!kr/k8s/**"
       - ".github/workflows/ci-kr.yml"
   pull_request:
     paths:
       - "kr/**"
+      - "!kr/k8s/**"
       - ".github/workflows/ci-kr.yml"
 
 jobs:

@@ -2,7 +2,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: screener-config
-  namespace: trading
+  namespace: trading-kr
 data:
   MIN_TRADE_AMOUNT: "5000000000"      # 거래대금 50억 이상 (원)
   MIN_MARKET_CAP: "300000000000"      # 시가총액 3000억 이상 (원)

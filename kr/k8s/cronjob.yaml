@@ -8,7 +8,7 @@ apiVersion: batch/v1
 kind: CronJob
 metadata:
   name: screener-job
-  namespace: trading
+  namespace: trading-kr
 spec:
   schedule: "0 8 * * 1-5"          # 08:00 KST 월–금
   timeZone: "Asia/Seoul"
@@ -46,7 +46,7 @@ apiVersion: batch/v1
 kind: CronJob
 metadata:
   name: screener-job-final
-  namespace: trading
+  namespace: trading-kr
 spec:
   schedule: "50 8 * * 1-5"         # 08:50 KST 월–금 (동시호가 반영)
   timeZone: "Asia/Seoul"
