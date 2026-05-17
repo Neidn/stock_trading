@@ -41,6 +41,33 @@ class TelegramNotifier:
             raise
 
 
+def _trading_guide(d) -> str:
+    entry = d.current_price
+    if entry <= 0:
+        return ""
+
+    # Stop: 1% below open (gap-fill defense); fallback to 1% below entry
+    ref = d.open_price if d.open_price > 0 else entry
+    stop = ref * 0.99
+    stop_pct = (stop - entry) / entry * 100
+
+    tp1 = entry * 1.02
+    tp2 = entry * 1.03
+    tp1_pct = 2.0
+    tp2_pct = 3.0
+
+    risk = abs(entry - stop)
+    rr1 = (tp1 - entry) / risk if risk > 0 else 0
+    rr2 = (tp2 - entry) / risk if risk > 0 else 0
+
+    return (
+        f"   ┌ 진입: {entry:,.0f}원\n"
+        f"   ├ 손절: {stop:,.0f}원 ({stop_pct:.1f}%)\n"
+        f"   ├ 1차TP: {tp1:,.0f}원 (+{tp1_pct:.0f}%)  R/R {rr1:.1f}:1\n"
+        f"   └ 2차TP: {tp2:,.0f}원 (+{tp2_pct:.0f}%)  R/R {rr2:.1f}:1\n"
+    )
+
+
 def _format_message(stocks: list[ScreenedStock], run_mode: str) -> str:
     label = _RUN_MODE_LABEL.get(run_mode, run_mode)
     lines = [f"🔔 <b>[스캘핑 후보]</b> {label}\n"]
@@ -51,12 +78,14 @@ def _format_message(stocks: list[ScreenedStock], run_mode: str) -> str:
         gap_sign = "+" if d.gap_pct >= 0 else ""
         change_sign = "+" if d.change_pct >= 0 else ""
         trade_eok = d.trade_amount / 1_0000_0000
+        cap_eok = d.market_cap / 1_0000_0000
 
         lines.append(
             f"{emoji} <b>{d.name}</b> ({d.ticker}) ★ {s.score}점\n"
             f"   현재가: {d.current_price:,.0f} | 갭: {gap_sign}{d.gap_pct:.1f}%\n"
             f"   전일比 등락: {change_sign}{d.change_pct:.1f}% | 거래량: 전일比 {d.volume_ratio:.1f}배\n"
-            f"   거래대금: {trade_eok:.0f}억 | 시장: {d.market}\n"
+            f"   거래대금: {trade_eok:.0f}억 | 시총: {cap_eok:.0f}억 | {d.market}\n"
+            + _trading_guide(d)
         )
 
     lines.append("⚠️ 본 정보는 참고용이며 투자 판단은 본인 책임입니다.")
