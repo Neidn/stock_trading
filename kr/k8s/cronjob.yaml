@@ -24,7 +24,7 @@ spec:
           restartPolicy: OnFailure
           containers:
             - name: screener
-              image: your-registry/kr-stock-screener:latest
+              image: neidn/stock-trading-kr:latest
               envFrom:
                 - configMapRef:
                     name: screener-config
@@ -62,7 +62,7 @@ spec:
           restartPolicy: OnFailure
           containers:
             - name: screener
-              image: your-registry/kr-stock-screener:latest
+              image: neidn/stock-trading-kr:latest
               envFrom:
                 - configMapRef:
                     name: screener-config
