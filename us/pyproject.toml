@@ -3,7 +3,7 @@ requires = ["setuptools>=69", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "stock-trading"
+name = "stock-trading-us"
 version = "0.1.0"
 description = "Manual-watchlist stock screener and strategy signal system"
 requires-python = ">=3.11"
@@ -19,7 +19,7 @@ dev = [
 ]
 
 [project.scripts]
-stock-trading = "stock_trading.cli:main"
+stock-trading-us = "stock_trading.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

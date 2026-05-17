@@ -1,12 +1,21 @@
-name: CI
+name: CI (US)
 
 on:
   push:
+    paths:
+      - "us/**"
+      - ".github/workflows/ci-us.yml"
   pull_request:
+    paths:
+      - "us/**"
+      - ".github/workflows/ci-us.yml"
 
 jobs:
-  test:
+  test-us:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: us
 
     steps:
       - name: Check out repository
@@ -26,13 +35,13 @@ jobs:
       - name: Run tests
         run: pytest
 
-  docker:
+  docker-us:
     runs-on: ubuntu-latest
-    needs: test
+    needs: test-us
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     env:
       DOCKERHUB_NAMESPACE: neidn
-      DOCKER_IMAGE: neidn/stock-trading
+      DOCKER_IMAGE: neidn/stock-trading-us
 
     steps:
       - name: Check out repository
@@ -76,7 +85,7 @@ jobs:
       - name: Build and push Docker image
         uses: docker/build-push-action@v6
         with:
-          context: .
+          context: us
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
