@@ -60,6 +60,24 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
+      - name: Validate Docker Hub secrets
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          for var in DOCKERHUB_USERNAME DOCKERHUB_TOKEN; do
+            val="${!var}"
+            if [ -z "$val" ]; then
+              echo "::error::${var} is empty or missing"
+              exit 1
+            fi
+            if printf '%s' "$val" | grep -qP '\s'; then
+              echo "::error::${var} contains whitespace or newline — re-enter the secret without extra characters"
+              exit 1
+            fi
+          done
+
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
         with:
