@@ -46,23 +46,27 @@ def _trading_guide(d) -> str:
     if entry <= 0:
         return ""
 
-    # Stop: 1% below open (gap-fill defense); fallback to 1% below entry
-    ref = d.open_price if d.open_price > 0 else entry
-    stop = ref * 0.99
-    stop_pct = (stop - entry) / entry * 100
+    # Scale stop/target with gap size so R/R stays ≥ 1.5:1
+    gap_abs = abs(d.gap_pct)
+    if gap_abs >= 10:
+        stop_pct, tp1_pct, tp2_pct = 3.0, 5.0, 8.0
+    elif gap_abs >= 5:
+        stop_pct, tp1_pct, tp2_pct = 2.0, 4.0, 6.0
+    elif gap_abs >= 2:
+        stop_pct, tp1_pct, tp2_pct = 1.5, 3.0, 5.0
+    else:
+        stop_pct, tp1_pct, tp2_pct = 1.0, 2.0, 3.0
 
-    tp1 = entry * 1.02
-    tp2 = entry * 1.03
-    tp1_pct = 2.0
-    tp2_pct = 3.0
-
-    risk = abs(entry - stop)
-    rr1 = (tp1 - entry) / risk if risk > 0 else 0
-    rr2 = (tp2 - entry) / risk if risk > 0 else 0
+    stop = entry * (1 - stop_pct / 100)
+    tp1 = entry * (1 + tp1_pct / 100)
+    tp2 = entry * (1 + tp2_pct / 100)
+    risk = entry - stop
+    rr1 = (tp1 - entry) / risk
+    rr2 = (tp2 - entry) / risk
 
     return (
         f"   ┌ 진입: {entry:,.0f}원\n"
-        f"   ├ 손절: {stop:,.0f}원 ({stop_pct:.1f}%)\n"
+        f"   ├ 손절: {stop:,.0f}원 (-{stop_pct:.1f}%)\n"
         f"   ├ 1차TP: {tp1:,.0f}원 (+{tp1_pct:.0f}%)  R/R {rr1:.1f}:1\n"
         f"   └ 2차TP: {tp2:,.0f}원 (+{tp2_pct:.0f}%)  R/R {rr2:.1f}:1\n"
     )
