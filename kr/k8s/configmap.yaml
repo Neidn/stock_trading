@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: screener-config
+  namespace: trading
+data:
+  MIN_TRADE_AMOUNT: "5000000000"      # 거래대금 50억 이상 (원)
+  MIN_MARKET_CAP: "300000000000"      # 시가총액 3000억 이상 (원)
+  MIN_CHANGE_PCT: "1.0"               # 전일 대비 ±1% 이상
+  MAX_CHANGE_PCT: "28.0"              # 상한가 직전 제외
+  MIN_GAP_PCT: "0.5"                  # 시초가 갭 0.5% 이상 (final 실행 시만)
+  MIN_VOLUME_RATIO: "2.0"             # 전일 거래량 대비 2배 이상
+  TOP_N: "5"
+  MARKET: "ALL"                       # ALL / KOSPI / KOSDAQ
+  MODE: "paper"                       # paper=모의투자, live=실전

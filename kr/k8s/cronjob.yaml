@@ -1,0 +1,80 @@
+# Requires k8s 1.27+ for timeZone field.
+# If your cluster is older, remove timeZone and convert schedules to UTC:
+#   08:00 KST = "0 23 * * 0-4" UTC  (Sun–Thu night)
+#   08:50 KST = "50 23 * * 0-4" UTC
+
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: screener-job
+  namespace: trading
+spec:
+  schedule: "0 8 * * 1-5"          # 08:00 KST 월–금
+  timeZone: "Asia/Seoul"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 300
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: screener
+              image: your-registry/kr-stock-screener:latest
+              envFrom:
+                - configMapRef:
+                    name: screener-config
+                - secretRef:
+                    name: screener-secret
+              env:
+                - name: RUN_MODE
+                  value: "pre_market"
+              resources:
+                requests:
+                  memory: "256Mi"
+                  cpu: "100m"
+                limits:
+                  memory: "512Mi"
+                  cpu: "500m"
+
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: screener-job-final
+  namespace: trading
+spec:
+  schedule: "50 8 * * 1-5"         # 08:50 KST 월–금 (동시호가 반영)
+  timeZone: "Asia/Seoul"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 300
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: screener
+              image: your-registry/kr-stock-screener:latest
+              envFrom:
+                - configMapRef:
+                    name: screener-config
+                - secretRef:
+                    name: screener-secret
+              env:
+                - name: RUN_MODE
+                  value: "final"
+              resources:
+                requests:
+                  memory: "256Mi"
+                  cpu: "100m"
+                limits:
+                  memory: "512Mi"
+                  cpu: "500m"

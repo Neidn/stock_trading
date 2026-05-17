@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "stock-trading-kr"
+version = "0.1.0"
+description = "KR stock scalping screener using KIS Open API"
+requires-python = ">=3.11"
+dependencies = [
+  "requests>=2.31",
+  "python-telegram-bot>=20.7",
+  "pydantic>=2.5",
+  "pydantic-settings>=2.1",
+  "tenacity>=8.2",
+  "pytz>=2023.3",
+  "structlog>=23.2",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+]
+
+[project.scripts]
+stock-trading-kr = "screener.main:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["screener*"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
