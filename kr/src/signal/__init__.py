@@ -1,0 +1,1 @@
+"""Signal engine: strategy pattern, indicators, signal generation."""

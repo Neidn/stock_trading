@@ -1,0 +1,1 @@
+"""Safety monitor and emergency handler (runs in independent K8s pod)."""

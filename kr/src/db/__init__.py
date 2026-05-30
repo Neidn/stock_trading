@@ -1,0 +1,1 @@
+"""SQLite database layer: connection management, schema models, archiver."""

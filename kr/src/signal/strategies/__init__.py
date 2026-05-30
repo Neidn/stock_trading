@@ -1,0 +1,1 @@
+"""Strategy implementations. Each module exposes one *Strategy class inheriting BaseStrategy."""

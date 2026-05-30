@@ -1,0 +1,1 @@
+"""Data ingestion: WebSocket streams, REST polling, symbol screener."""
