@@ -1,0 +1,26 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: trading-config
+  namespace: trading
+  labels:
+    app.kubernetes.io/part-of: kr-stock-autotrading
+data:
+  TRADING_MODE: "paper"          # paper | live
+  LIVE_CONFIRM: "LIVE"           # required when TRADING_MODE=live
+  ACTIVE_STRATEGY: "rsi_macd"
+  STRATEGY_PARAMS: |
+    {"rsi_period": 14, "rsi_oversold": 35, "rsi_overbought": 65,
+     "fast_period": 12, "slow_period": 26, "signal_period": 9,
+     "sl_atr_mult": 2.0, "tp1_atr_mult": 3.0, "tp2_atr_mult": 5.0}
+
+  RISK_PER_TRADE: "0.01"
+  MAX_POSITIONS: "5"
+  DAILY_LOSS_LIMIT: "0.05"
+
+  MARKET: "BOTH"                 # KOSPI | KOSDAQ | BOTH
+  ALLOW_OVERNIGHT: "false"
+  FORCE_CLOSE_TIME: "15:20"
+
+  SQLITE_DB_PATH: "/data/trading.db"
+  LOG_LEVEL: "INFO"
