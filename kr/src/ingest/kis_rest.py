@@ -480,3 +480,178 @@ class KISRestClient:
             symbol, qty, ord_unpr, "paper" if self._paper else "live",
         )
         return data.get("output", {})
+
+    async def cancel_order(
+        self,
+        order_no: str,
+        krx_orgno: str,
+        qty: int,
+        ord_dvsn: str = "00",
+    ) -> dict:
+        """Cancel a pending order.
+
+        Args:
+            order_no: 주문번호 (odno from place_buy/sell_order response).
+            krx_orgno: KRX 전송 조직 번호 (KRX_FWDG_ORD_ORGNO from order response).
+            qty: Quantity to cancel (use 0 + QTY_ALL_ORD_YN="Y" for full cancel).
+            ord_dvsn: Order type code from original order.
+        """
+        tr_id = "VTTC0803U" if self._paper else "TTTC0803U"
+        data = await self._post(
+            "/uapi/domestic-stock/v1/trading/order-rvsecncl",
+            tr_id=tr_id,
+            body={
+                "CANO": self._acct_no,
+                "ACNT_PRDT_CD": self._acct_prod,
+                "KRX_FWDG_ORD_ORGNO": krx_orgno,
+                "ORGN_ODNO": order_no,
+                "ORD_DVSN": ord_dvsn,
+                "RVSE_CNCL_DVSN_CD": "02",  # 취소
+                "ORD_QTY": str(qty),
+                "QTY_ALL_ORD_YN": "Y",       # 전량취소
+                "ORD_UNPR": "0",
+            },
+        )
+        logger.info("kis.cancel.placed order_no=%s", order_no)
+        return data.get("output", {})
+
+    async def fetch_unfilled_orders(self) -> list[dict]:
+        """Fetch all pending (unfilled/cancellable) orders for today.
+
+        Returns:
+            List of dicts with keys: order_no, krx_orgno, symbol, qty,
+            filled_qty, ord_dvsn, status.
+        """
+        tr_id = "VTTC8036R" if self._paper else "TTTC8036R"
+        data = await self._get(
+            "/uapi/domestic-stock/v1/trading/inquire-psbl-rvsecncl",
+            tr_id=tr_id,
+            params={
+                "CANO": self._acct_no,
+                "ACNT_PRDT_CD": self._acct_prod,
+                "CTX_AREA_FK100": "",
+                "CTX_AREA_NK100": "",
+                "INQR_DVSN_1": "0",
+                "INQR_DVSN_2": "0",
+            },
+        )
+        result = []
+        for item in data.get("output", []):
+            result.append({
+                "order_no":  item.get("odno", ""),
+                "krx_orgno": item.get("krx_fwdg_ord_orgno", ""),
+                "symbol":    item.get("pdno", ""),
+                "qty":       int(item.get("ord_qty", "0") or "0"),
+                "filled_qty": int(item.get("tot_ccld_qty", "0") or "0"),
+                "ord_dvsn":  item.get("ord_dvsn", "00"),
+                "price":     item.get("ord_unpr", "0"),
+            })
+        return result
+
+    # ------------------------------------------------------------------
+    # Screener ranking APIs
+    # ------------------------------------------------------------------
+
+    async def fetch_volume_ranking(
+        self,
+        market: str = "J",
+        top_n: int = 30,
+    ) -> list[dict]:
+        """Fetch top stocks by trading volume (거래량 순위).
+
+        Args:
+            market: ``'J'`` for KOSPI+주식, ``'Q'`` for KOSDAQ.
+            top_n: Max results to return.
+
+        Returns:
+            List of dicts: symbol, name, price, change_pct, volume,
+            trade_amount (원), market_code.
+        """
+        data = await self._get(
+            "/uapi/domestic-stock/v1/ranking/volume",
+            tr_id="FHPST01710000",
+            params={
+                "fid_cond_mrkt_div_code": market,
+                "fid_cond_scr_div_code": "20171",
+                "fid_input_iscd": "0001",
+                "fid_input_cnt_1": "0",
+                "fid_prd_div_code": "",
+                "fid_input_price_1": "",
+                "fid_input_price_2": "",
+                "fid_vol_cnt": "",
+                "fid_trgt_cls_code": "111111111",
+                "fid_trgt_exls_cls_code": "000000",
+                "fid_div_cls_code": "0",
+                "fid_rsfl_rate1": "",
+                "fid_rsfl_rate2": "",
+            },
+        )
+        result = []
+        for item in (data.get("output", []) or [])[:top_n]:
+            symbol = item.get("stck_shrn_iscd", "").strip()
+            if not symbol:
+                continue
+            result.append({
+                "symbol":       symbol,
+                "name":         item.get("hts_kor_isnm", "").strip(),
+                "price":        item.get("stck_prpr", "0"),
+                "change_pct":   item.get("prdy_ctrt", "0"),
+                "volume":       item.get("acml_vol", "0"),
+                "trade_amount": item.get("acml_tr_pbmn", "0"),  # 원
+                "market_code":  market,
+            })
+        return result
+
+    async def fetch_fluctuation_ranking(
+        self,
+        market: str = "J",
+        top_n: int = 30,
+        min_change: float = 2.0,
+        max_change: float = 30.0,
+    ) -> list[dict]:
+        """Fetch top stocks by price change rate (등락률 순위, 상승 only).
+
+        Args:
+            market: ``'J'`` for KOSPI, ``'Q'`` for KOSDAQ.
+            top_n: Max results.
+            min_change: Minimum positive change % (e.g. 2.0 = +2%).
+            max_change: Maximum change % cap (filters out limit-up noise).
+
+        Returns:
+            List of dicts: symbol, name, price, change_pct, volume, trade_amount.
+        """
+        data = await self._get(
+            "/uapi/domestic-stock/v1/ranking/fluctuation",
+            tr_id="FHPST01700000",
+            params={
+                "fid_cond_mrkt_div_code": market,
+                "fid_cond_scr_div_code": "20170",
+                "fid_input_iscd": "0001",
+                "fid_rank_sort_cls_code": "0",   # 0 = 상승률 순
+                "fid_input_cnt_1": "0",
+                "fid_prd_div_code": "",
+                "fid_input_price_1": "",
+                "fid_input_price_2": "",
+                "fid_vol_cnt": "",
+                "fid_trgt_cls_code": "111111111",
+                "fid_trgt_exls_cls_code": "000000",
+                "fid_div_cls_code": "0",
+                "fid_rsfl_rate1": str(min_change),
+                "fid_rsfl_rate2": str(max_change),
+            },
+        )
+        result = []
+        for item in (data.get("output", []) or [])[:top_n]:
+            symbol = item.get("stck_shrn_iscd", "").strip()
+            if not symbol:
+                continue
+            result.append({
+                "symbol":       symbol,
+                "name":         item.get("hts_kor_isnm", "").strip(),
+                "price":        item.get("stck_prpr", "0"),
+                "change_pct":   item.get("prdy_ctrt", "0"),
+                "volume":       item.get("acml_vol", "0"),
+                "trade_amount": item.get("acml_tr_pbmn", "0"),
+                "market_code":  market,
+            })
+        return result
