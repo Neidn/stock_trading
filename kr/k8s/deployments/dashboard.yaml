@@ -1,0 +1,77 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dashboard
+  namespace: trading-stock-kr
+  labels:
+    app: dashboard
+    app.kubernetes.io/part-of: binance-futures-autotrading
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: dashboard
+  template:
+    metadata:
+      labels:
+        app: dashboard
+    spec:
+      restartPolicy: Always
+
+      imagePullSecrets:
+        - name: dockerhub-credentials
+
+      # Must be on the same node as the SQLite PVC
+      nodeSelector:
+        storage: sqlite-node
+
+      containers:
+        - name: dashboard
+          image: neidn/binance-futures-trading:latest
+          imagePullPolicy: Always
+          command: ["python", "-m", "gunicorn", "--bind", "0.0.0.0:5000", "--workers", "2", "--timeout", "60", "src.monitoring.dashboard:app"]
+          ports:
+            - containerPort: 5000
+
+          envFrom:
+            - configMapRef:
+                name: trading-config
+            - secretRef:
+                name: binance-api-secret
+
+          env:
+            - name: DASHBOARD_PORT
+              value: "5000"
+
+          livenessProbe:
+            httpGet:
+              path: /api/status
+              port: 5000
+            initialDelaySeconds: 15
+            periodSeconds: 30
+            failureThreshold: 3
+
+          readinessProbe:
+            httpGet:
+              path: /api/status
+              port: 5000
+            initialDelaySeconds: 10
+            periodSeconds: 15
+
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "200m"
+              memory: "256Mi"
+
+          volumeMounts:
+            - name: sqlite-data
+              mountPath: /data
+              readOnly: true
+
+      volumes:
+        - name: sqlite-data
+          persistentVolumeClaim:
+            claimName: sqlite-pvc

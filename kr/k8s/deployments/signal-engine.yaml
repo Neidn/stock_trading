@@ -1,0 +1,72 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: signal-engine
+  namespace: trading-stock-kr
+  labels:
+    app: signal-engine
+    app.kubernetes.io/part-of: binance-futures-autotrading
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: signal-engine
+  template:
+    metadata:
+      labels:
+        app: signal-engine
+    spec:
+      restartPolicy: Always
+
+      imagePullSecrets:
+        - name: dockerhub-credentials
+
+      # Schedule on the node that owns the SQLite PVC
+      nodeSelector:
+        storage: sqlite-node
+
+      containers:
+        - name: signal-engine
+          image: neidn/binance-futures-trading:latest
+          imagePullPolicy: Always
+          command: ["python", "-m", "src.signal.main"]
+          ports:
+            - containerPort: 8080
+
+          envFrom:
+            - configMapRef:
+                name: trading-config
+            - secretRef:
+                name: binance-api-secret
+
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            failureThreshold: 3
+
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 10
+
+          resources:
+            requests:
+              cpu: "300m"
+              memory: "512Mi"
+            limits:
+              cpu: "800m"
+              memory: "1Gi"
+
+          volumeMounts:
+            - name: sqlite-data
+              mountPath: /data
+
+      volumes:
+        - name: sqlite-data
+          persistentVolumeClaim:
+            claimName: sqlite-pvc

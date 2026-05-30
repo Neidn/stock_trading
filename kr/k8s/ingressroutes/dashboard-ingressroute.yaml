@@ -1,0 +1,49 @@
+# ─── HTTPS ────────────────────────────────────────────────────────────────────
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: dashboard
+  namespace: trading-stock-kr
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    - match: Host(`dashboard.neidn.com`)
+      kind: Rule
+      services:
+        - name: dashboard-svc
+          port: 80
+  tls:
+    certResolver: letsencrypt
+
+---
+# ─── HTTP → HTTPS 리다이렉트 ──────────────────────────────────────────────────
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: dashboard-http
+  namespace: trading-stock-kr
+spec:
+  entryPoints:
+    - web
+  routes:
+    - match: Host(`dashboard.neidn.com`)
+      kind: Rule
+      middlewares:
+        - name: redirect-to-https
+          namespace: trading-stock-kr
+      services:
+        - name: dashboard-svc
+          port: 80
+
+---
+# ─── HTTP → HTTPS 리다이렉트 미들웨어 ─────────────────────────────────────────
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: redirect-to-https
+  namespace: trading-stock-kr
+spec:
+  redirectScheme:
+    scheme: https
+    permanent: true

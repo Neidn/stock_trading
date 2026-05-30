@@ -1,0 +1,55 @@
+# Volatility screener — every 4h (00:00, 04:00, 08:00, 12:00, 16:00, 20:00 UTC)
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: screener
+  namespace: trading-stock-kr
+  labels:
+    app: screener
+    app.kubernetes.io/part-of: binance-futures-autotrading
+spec:
+  schedule: "0 */4 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          labels:
+            app: screener
+        spec:
+          restartPolicy: OnFailure
+          imagePullSecrets:
+            - name: dockerhub-credentials
+          nodeSelector:
+            storage: sqlite-node
+          volumes:
+            - name: trading-db
+              persistentVolumeClaim:
+                claimName: sqlite-pvc
+          containers:
+            - name: screener
+              image: neidn/binance-futures-trading:latest
+              imagePullPolicy: Always
+              command: ["python", "-m", "src.jobs.screener"]
+              envFrom:
+                - configMapRef:
+                    name: trading-config
+                - secretRef:
+                    name: binance-api-secret
+                - secretRef:
+                    name: telegram-secret
+              env:
+                - name: DB_PATH
+                  value: /data/trading.db
+              volumeMounts:
+                - name: trading-db
+                  mountPath: /data
+              resources:
+                requests:
+                  memory: "128Mi"
+                  cpu: "100m"
+                limits:
+                  memory: "256Mi"
+                  cpu: "500m"

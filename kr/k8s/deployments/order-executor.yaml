@@ -1,0 +1,7 @@
+# order-executor is NOT a standalone pod.
+#
+# OrderManager runs in-process within signal-engine — it is called directly
+# by SignalEngine._persist_signal() after a signal passes pre_entry_check.
+# A separate order-executor pod is planned for Phase 5+ (gRPC or Redis queue).
+#
+# No Deployment is needed here for Phase 4 Demo Trading validation.

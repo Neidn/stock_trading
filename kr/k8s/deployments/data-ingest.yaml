@@ -1,0 +1,78 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: data-ingest
+  namespace: trading-stock-kr
+  labels:
+    app: data-ingest
+    app.kubernetes.io/part-of: binance-futures-autotrading
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: data-ingest
+  template:
+    metadata:
+      labels:
+        app: data-ingest
+    spec:
+      restartPolicy: Always
+
+      imagePullSecrets:
+        - name: dockerhub-credentials
+
+      # Schedule on the node that owns the SQLite PVC
+      nodeSelector:
+        storage: sqlite-node
+
+      containers:
+        - name: data-ingest
+          image: neidn/binance-futures-trading:latest
+          imagePullPolicy: Always
+          command: ["python", "-m", "src.ingest.main"]
+          ports:
+            - containerPort: 8080
+
+          envFrom:
+            - configMapRef:
+                name: trading-config
+            - secretRef:
+                name: binance-api-secret
+
+          # Uncomment to override subscribed symbols (default: active symbols in DB)
+          # env:
+          #   - name: SYMBOLS
+          #     value: "BTCUSDT,ETHUSDT"
+
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 15
+            failureThreshold: 3
+
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8080
+            initialDelaySeconds: 30   # allow WS streams to connect
+            periodSeconds: 10
+            failureThreshold: 6
+
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+
+          volumeMounts:
+            - name: sqlite-data
+              mountPath: /data
+
+      volumes:
+        - name: sqlite-data
+          persistentVolumeClaim:
+            claimName: sqlite-pvc

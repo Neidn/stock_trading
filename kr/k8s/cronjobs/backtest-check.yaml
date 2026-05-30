@@ -1,0 +1,52 @@
+# Weekly param + drift checker — every Monday 00:00 UTC (09:00 KST)
+# Runs rank check (best grid params vs current) + drift check (live PF vs backtest PF).
+# Sends Telegram WARNING only when action is needed. Silent otherwise.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: backtest-check
+  namespace: trading-stock-kr
+  labels:
+    app: backtest-check
+    app.kubernetes.io/part-of: binance-futures-autotrading
+spec:
+  schedule: "0 0 * * 1"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 4
+  failedJobsHistoryLimit: 2
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          labels:
+            app: backtest-check
+        spec:
+          restartPolicy: OnFailure
+          nodeSelector:
+            storage: sqlite-node
+          imagePullSecrets:
+            - name: dockerhub-credentials
+          containers:
+            - name: backtest-check
+              image: neidn/binance-futures-trading:latest
+              imagePullPolicy: Always
+              command: ["python", "-m", "src.jobs.backtest_report", "check"]
+              envFrom:
+                - configMapRef:
+                    name: trading-config
+                - secretRef:
+                    name: telegram-secret
+              volumeMounts:
+                - name: trading-db
+                  mountPath: /data
+              resources:
+                requests:
+                  memory: "256Mi"
+                  cpu: "100m"
+                limits:
+                  memory: "512Mi"
+                  cpu: "500m"
+          volumes:
+            - name: trading-db
+              persistentVolumeClaim:
+                claimName: sqlite-pvc

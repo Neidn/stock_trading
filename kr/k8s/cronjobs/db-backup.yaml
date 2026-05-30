@@ -1,0 +1,48 @@
+# Daily DB backup — 02:00 UTC (11:00 KST). Hot backup via sqlite3 API, keeps last 7.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: db-backup
+  namespace: trading-stock-kr
+  labels:
+    app: db-backup
+    app.kubernetes.io/part-of: binance-futures-autotrading
+spec:
+  schedule: "0 2 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 7
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          labels:
+            app: db-backup
+        spec:
+          restartPolicy: OnFailure
+          nodeSelector:
+            storage: sqlite-node
+          imagePullSecrets:
+            - name: dockerhub-credentials
+          volumes:
+            - name: trading-db
+              persistentVolumeClaim:
+                claimName: sqlite-pvc
+          containers:
+            - name: db-backup
+              image: neidn/binance-futures-trading:latest
+              imagePullPolicy: Always
+              command: ["python", "-m", "src.jobs.db_backup"]
+              envFrom:
+                - configMapRef:
+                    name: trading-config
+              volumeMounts:
+                - name: trading-db
+                  mountPath: /data
+              resources:
+                requests:
+                  memory: "64Mi"
+                  cpu: "50m"
+                limits:
+                  memory: "256Mi"
+                  cpu: "200m"

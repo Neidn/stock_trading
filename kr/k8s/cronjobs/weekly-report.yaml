@@ -1,0 +1,53 @@
+# Weekly performance report — every Monday 00:00 UTC (09:00 KST)
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: weekly-report
+  namespace: trading-stock-kr
+  labels:
+    app: weekly-report
+    app.kubernetes.io/part-of: binance-futures-autotrading
+spec:
+  schedule: "0 0 * * 1"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          labels:
+            app: weekly-report
+        spec:
+          restartPolicy: OnFailure
+          imagePullSecrets:
+            - name: dockerhub-credentials
+          nodeSelector:
+            storage: sqlite-node
+          volumes:
+            - name: trading-db
+              persistentVolumeClaim:
+                claimName: sqlite-pvc
+          containers:
+            - name: report
+              image: neidn/binance-futures-trading:latest
+              imagePullPolicy: Always
+              command: ["python", "-m", "src.jobs.weekly_report"]
+              envFrom:
+                - configMapRef:
+                    name: trading-config
+                - secretRef:
+                    name: telegram-secret
+              env:
+                - name: SQLITE_DB_PATH
+                  value: /data/trading.db
+              volumeMounts:
+                - name: trading-db
+                  mountPath: /data
+              resources:
+                requests:
+                  memory: "64Mi"
+                  cpu: "50m"
+                limits:
+                  memory: "128Mi"
+                  cpu: "200m"

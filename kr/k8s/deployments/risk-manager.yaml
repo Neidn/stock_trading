@@ -1,0 +1,7 @@
+# risk-manager is NOT a standalone pod.
+#
+# DrawdownGuard and LiquidationGuard run in-process within signal-engine —
+# LiquidationGuard.pre_entry_check() is called per signal before order submission.
+# A separate risk-manager pod is planned for Phase 5+ (shared state via Redis).
+#
+# No Deployment is needed here for Phase 4 Demo Trading validation.
