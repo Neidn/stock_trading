@@ -35,13 +35,27 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.13"
           cache: pip
 
-      - name: Install dependencies
-        run: pip install -e ".[dev]"
+      - name: Install dependencies (no TA-Lib C compile in lint)
+        run: pip install aiohttp python-dotenv python-dateutil pytz python-telegram-bot structlog pytest pytest-asyncio
 
       - name: Check imports resolve
-        run: python -c "from screener.config import Settings; from screener.kis_client import KISClient; from screener.screener import StockScreener; from screener.notifier import TelegramNotifier; print('OK')"
+        env:
+          TRADING_MODE: paper
+          KIS_APP_KEY: dummy
+          KIS_APP_SECRET: dummy
+          KIS_ACCOUNT_NO: "0000000000-01"
+          TELEGRAM_BOT_TOKEN: dummy
+          TELEGRAM_CHAT_ID: "0"
+        run: |
+          python -c "
+          from src.utils.config import load_config
+          from src.risk.market_hours import is_market_open, is_trading_day
+          from src.ingest.kis_rest import KISRestClient
+          from src.ingest.kis_ws import KISWSManager
+          print('OK')
+          "
 
   # ── Jobs 2 & 3 (build + merge) disabled — push manually until CI secret fixed ──
