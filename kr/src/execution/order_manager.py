@@ -17,6 +17,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
+from src.db.models import upsert_position
 from src.utils.config import load_config
 
 if TYPE_CHECKING:
@@ -259,7 +260,66 @@ class OrderManager:
             + (f" @ {fill_price}" if fill_price else " (market)")
         )
         submitted["confirmed"] = True
+
+        # Auto-register position record if SL/TP provided and this is a buy
+        if side == "buy" and order.get("sl"):
+            entry = fill_price or price or 0
+            submitted["position_id"] = self.register_position(
+                symbol=symbol,
+                quantity=quantity,
+                fill_price=int(entry) if entry else 0,
+                sl=int(order["sl"]),
+                tp1=int(order["tp1"]) if order.get("tp1") else None,
+                tp2=int(order["tp2"]) if order.get("tp2") else None,
+                signal_id=order.get("signal_id"),
+                strategy_name=order.get("strategy_name"),
+            )
         return submitted
+
+    # ------------------------------------------------------------------
+    # Position registration
+    # ------------------------------------------------------------------
+
+    def register_position(
+        self,
+        symbol: str,
+        quantity: int,
+        fill_price: int,
+        sl: int,
+        tp1: int | None = None,
+        tp2: int | None = None,
+        signal_id: str | None = None,
+        strategy_name: str | None = None,
+    ) -> str:
+        """Create a position record in DB after a buy fill.
+
+        Called automatically by :meth:`submit_and_confirm` when ``sl`` is set
+        in the order dict.  Can also be called manually.
+
+        Returns:
+            The new position_id.
+        """
+        position_id = str(uuid.uuid4())
+        upsert_position(self._conn, {
+            "position_id":    position_id,
+            "symbol":         symbol,
+            "side":           "long",
+            "entry_price":    str(fill_price),
+            "quantity":       str(quantity),
+            "stop_loss":      str(sl),
+            "initial_stop_loss": str(sl),
+            "take_profit_1":  str(tp1) if tp1 else None,
+            "take_profit_2":  str(tp2) if tp2 else None,
+            "fill_price":     str(fill_price),
+            "trading_mode":   self._config.trading_mode.value,
+            "strategy_name":  strategy_name,
+        })
+        self._conn.commit()
+        logger.info(
+            "position.registered id=%s symbol=%s entry=%d sl=%d tp1=%s tp2=%s",
+            position_id, symbol, fill_price, sl, tp1, tp2,
+        )
+        return position_id
 
     # ------------------------------------------------------------------
     # Slippage validation
