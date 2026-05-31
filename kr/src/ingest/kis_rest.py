@@ -643,6 +643,7 @@ class KISRestClient:
                 "fid_div_cls_code": "0",
                 "fid_rsfl_rate1": str(min_change),
                 "fid_rsfl_rate2": str(max_change),
+                "fid_prc_cls_code": "0",
             },
         )
         result = []
