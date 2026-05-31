@@ -94,7 +94,7 @@ jobs:
   # ── Job 3: build each platform in parallel ───────────────────────────────────
   build:
     needs: [lint, test]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     if: github.event_name != 'pull_request'
     strategy:
       fail-fast: false
@@ -154,7 +154,7 @@ jobs:
 
   # ── Job 4: merge platform digests into multi-arch manifest ───────────────────
   merge:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     needs: build
 
     steps:
