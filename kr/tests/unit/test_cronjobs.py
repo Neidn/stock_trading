@@ -51,6 +51,7 @@ CREATE TABLE IF NOT EXISTS positions (
     status          TEXT NOT NULL DEFAULT 'open',
     close_reason    TEXT,
     trading_mode    TEXT NOT NULL DEFAULT 'paper',
+    strategy_name   TEXT,
     opened_at       TEXT NOT NULL DEFAULT (datetime('now')),
     closed_at       TEXT
 );
@@ -348,6 +349,82 @@ class TestDbArchiverJob(unittest.TestCase):
             _insert_kline(conn, interval="1m", open_time=ts)
         result = DbArchiverJob(conn=conn, keep_candles=2).run()
         self.assertEqual(result["deleted_rows"], 5)
+
+
+# ---------------------------------------------------------------------------
+# _performance_factor tests
+# ---------------------------------------------------------------------------
+
+def _make_perf_conn(trades: list[tuple[str, float]]) -> sqlite3.Connection:
+    """In-memory DB with closed positions. trades: [(strategy_name, realized_pnl)]"""
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript("""
+        CREATE TABLE positions (
+            position_id TEXT PRIMARY KEY,
+            symbol TEXT,
+            strategy_name TEXT,
+            realized_pnl TEXT DEFAULT '0',
+            status TEXT DEFAULT 'open',
+            closed_at TEXT
+        );
+    """)
+    for i, (strat, pnl) in enumerate(trades):
+        conn.execute(
+            "INSERT INTO positions VALUES (?, 'TEST', ?, ?, 'closed', datetime('now'))",
+            (str(i), strat, str(pnl)),
+        )
+    conn.commit()
+    return conn
+
+
+from src.jobs.screener import _performance_factor
+
+
+class TestPerformanceFactor(unittest.TestCase):
+    def test_neutral_no_conn(self):
+        assert _performance_factor("rsi_macd", conn=None) == 1.0
+
+    def test_neutral_cold_start_fewer_than_5(self):
+        conn = _make_perf_conn([("rsi_macd", 100.0)] * 4)
+        assert _performance_factor("rsi_macd", conn) == 1.0
+
+    def test_perfect_win_rate_clamped_at_1_5(self):
+        conn = _make_perf_conn([("rsi_macd", 100.0)] * 20)
+        result = _performance_factor("rsi_macd", conn)
+        assert result == 1.5  # 100% win rate → 1.0/0.5=2.0 → clamped to 1.5
+
+    def test_zero_win_rate_clamped_at_0_5(self):
+        conn = _make_perf_conn([("rsi_macd", -100.0)] * 10)
+        result = _performance_factor("rsi_macd", conn)
+        assert result == 0.5  # 0% win rate → 0/0.5=0 → clamped to 0.5
+
+    def test_neutral_at_50_pct_win_rate(self):
+        trades = [("rsi_macd", 100.0)] * 10 + [("rsi_macd", -100.0)] * 10
+        conn = _make_perf_conn(trades)
+        import pytest
+        result = _performance_factor("rsi_macd", conn)
+        assert result == pytest.approx(1.0)
+
+    def test_70_pct_win_rate_gives_1_4(self):
+        trades = [("rsi_macd", 100.0)] * 7 + [("rsi_macd", -100.0)] * 3
+        conn = _make_perf_conn(trades)
+        import pytest
+        result = _performance_factor("rsi_macd", conn)
+        assert result == pytest.approx(1.4)
+
+    def test_isolates_by_strategy_name(self):
+        trades = (
+            [("rsi_macd", 100.0)] * 10     # 100% win
+            + [("zscore_reversion", -50.0)] * 10  # 0% win
+        )
+        conn = _make_perf_conn(trades)
+        assert _performance_factor("rsi_macd", conn) == 1.5
+        assert _performance_factor("zscore_reversion", conn) == 0.5
+
+    def test_unknown_strategy_neutral(self):
+        conn = _make_perf_conn([("rsi_macd", 100.0)] * 10)
+        assert _performance_factor("nonexistent", conn) == 1.0
 
 
 if __name__ == "__main__":

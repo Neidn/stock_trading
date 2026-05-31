@@ -185,20 +185,25 @@ class ScreenerJob:
         for sym in removed:
             self._conn.execute("UPDATE symbols SET is_active=0 WHERE symbol=?", (sym,))
 
+        strategies = _discover_strategies()
         for item in selected:
             sym = item["symbol"]
             name = item.get("name", sym)
             market = "KOSPI" if item.get("market_code") == "J" else "KOSDAQ"
             market_cap = item.get("market_cap", "0")
+            indicators = _compute_symbol_indicators(self._conn, sym)
+            strategy = _assign_strategy(indicators, strategies, conn=self._conn)
             self._conn.execute(
                 """
-                INSERT INTO symbols (symbol, base_asset, quote_asset, is_active, market, market_cap)
-                VALUES (?, ?, 'KRW', 1, ?, ?)
+                INSERT INTO symbols (symbol, base_asset, quote_asset, is_active, market, market_cap, strategy)
+                VALUES (?, ?, 'KRW', 1, ?, ?, ?)
                 ON CONFLICT(symbol) DO UPDATE SET
-                    is_active=1, market=excluded.market, market_cap=excluded.market_cap
+                    is_active=1, market=excluded.market, market_cap=excluded.market_cap,
+                    strategy=excluded.strategy
                 """,
-                (sym, name, market, market_cap),
+                (sym, name, market, market_cap, strategy),
             )
+            logger.debug("symbol.strategy sym=%s strategy=%s indicators=%s", sym, strategy, indicators)
         self._conn.commit()
 
     def _notify(self, selected: list[dict], added: list[str], removed: list[str]) -> None:
@@ -264,10 +269,43 @@ def _classify_regime(indicators: dict) -> str:
     return "ranging"
 
 
-def _assign_strategy(indicators: dict, strategies: list) -> str:
+def _performance_factor(strategy_name: str, conn, n: int = 20) -> float:
+    """Return a performance multiplier [0.5, 1.5] for *strategy_name*.
+
+    Queries the last *n* closed trades for the strategy and computes:
+        factor = win_rate / 0.50   (50% win rate = neutral 1.0)
+
+    Clamped to [0.5, 1.5] to prevent extreme domination.
+    Returns 1.0 (neutral) when fewer than 5 trades exist — cold start guard.
+
+    A "win" is any closed position with realized_pnl > 0.
+    """
+    if conn is None:
+        return 1.0
+    try:
+        rows = conn.execute(
+            "SELECT realized_pnl FROM positions"
+            " WHERE strategy_name=? AND status='closed'"
+            " ORDER BY closed_at DESC LIMIT ?",
+            (strategy_name, n),
+        ).fetchall()
+    except Exception:  # noqa: BLE001
+        return 1.0
+
+    if len(rows) < 5:
+        return 1.0
+
+    wins = sum(1 for r in rows if float(r[0] or 0) > 0)
+    win_rate = wins / len(rows)
+    return max(0.5, min(1.5, win_rate / 0.50))
+
+
+def _assign_strategy(indicators: dict, strategies: list, conn=None) -> str:
     """Pick the best-fit strategy name for current market indicators.
 
-    Filters by ``primary_regimes()``, then ranks by ``suitability_score()``.
+    Filters by ``primary_regimes()``, then ranks by:
+        suitability_score(indicators) × performance_factor(strategy, recent_trades)
+
     Falls back to full list if no strategy declares the detected regime.
     Returns the strategy's ``get_name()`` string.
     """
@@ -283,7 +321,16 @@ def _assign_strategy(indicators: dict, strategies: list) -> str:
     if not eligible:
         eligible = strategies
 
-    best_cls = max(eligible, key=lambda cls: cls.suitability_score(indicators))
+    def _composite_score(cls) -> float:
+        try:
+            name = cls(params={}).get_name()
+        except Exception:  # noqa: BLE001
+            name = cls.__name__.lower().replace("strategy", "")
+        base = cls.suitability_score(indicators)
+        perf = _performance_factor(name, conn)
+        return base * perf
+
+    best_cls = max(eligible, key=_composite_score)
     try:
         return best_cls(params={}).get_name()
     except Exception:  # noqa: BLE001
