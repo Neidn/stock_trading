@@ -152,7 +152,7 @@ class KISRestClient:
 
         self._token = data["access_token"]
         self._token_expires_at = time.time() + data.get("expires_in", 86400)
-        logger.info("kis.token.ok", expires_in=data.get("expires_in"))
+        logger.info("kis.token.ok expires_in=%s", data.get("expires_in"))
 
     # ------------------------------------------------------------------
     # Internal request
