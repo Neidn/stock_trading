@@ -253,41 +253,40 @@ class TestDrawdownGuard(unittest.TestCase):
     # -- Daily limit --
 
     def test_daily_limit_no_data(self):
-        with patch("src.utils.startup_recovery.get_cached_balance", return_value={"USDT": 10_000.0}):
+        with patch("src.utils.startup_recovery.get_cached_balance", return_value={"availableBalance": 10_000_000.0}):
             self.assertFalse(DrawdownGuard.is_daily_limit_reached(self.conn))
 
     def test_daily_limit_positive_pnl(self):
         self._insert_perf(date.today().isoformat(), 200.0)
-        with patch("src.utils.startup_recovery.get_cached_balance", return_value={"USDT": 10_000.0}):
+        with patch("src.utils.startup_recovery.get_cached_balance", return_value={"availableBalance": 10_000_000.0}):
             self.assertFalse(DrawdownGuard.is_daily_limit_reached(self.conn))
 
     def test_daily_limit_exceeded(self):
-        # loss 600 / balance 10000 = 6% > 5% default
-        self._insert_perf(date.today().isoformat(), -600.0)
-        with patch("src.utils.startup_recovery.get_cached_balance", return_value={"USDT": 10_000.0}):
+        # loss 600_000 / balance 10_000_000 = 6% > 5% default
+        self._insert_perf(date.today().isoformat(), -600_000.0)
+        with patch("src.utils.startup_recovery.get_cached_balance", return_value={"availableBalance": 10_000_000.0}):
             self.assertTrue(DrawdownGuard.is_daily_limit_reached(self.conn))
 
     def test_daily_limit_not_exceeded(self):
-        # loss 100 / balance 10000 = 1% < 5%
-        self._insert_perf(date.today().isoformat(), -100.0)
-        with patch("src.utils.startup_recovery.get_cached_balance", return_value={"USDT": 10_000.0}):
+        # loss 100_000 / balance 10_000_000 = 1% < 5%
+        self._insert_perf(date.today().isoformat(), -100_000.0)
+        with patch("src.utils.startup_recovery.get_cached_balance", return_value={"availableBalance": 10_000_000.0}):
             self.assertFalse(DrawdownGuard.is_daily_limit_reached(self.conn))
 
     # -- Weekly limit --
 
     def test_weekly_limit_no_data(self):
-        with patch("src.utils.startup_recovery.get_cached_balance", return_value={"USDT": 10_000.0}):
+        with patch("src.utils.startup_recovery.get_cached_balance", return_value={"availableBalance": 10_000_000.0}):
             self.assertFalse(DrawdownGuard.is_weekly_limit_reached(self.conn))
 
     def test_weekly_limit_exceeded(self):
-        # default weekly limit = 0.05*3 = 0.15; loss 2100/10000 = 21% > 15%
-        # Insert Mon/Tue/Wed of current week so all 3 days fall within week_start window
+        # default weekly limit = 0.05*3 = 0.15; loss 2_100_000/10_000_000 = 21% > 15%
         today = date.today()
         week_start = today - timedelta(days=today.weekday())
         for i in range(3):
             d = (week_start + timedelta(days=i)).isoformat()
-            self._insert_perf(d, -700.0)
-        with patch("src.utils.startup_recovery.get_cached_balance", return_value={"USDT": 10_000.0}):
+            self._insert_perf(d, -700_000.0)
+        with patch("src.utils.startup_recovery.get_cached_balance", return_value={"availableBalance": 10_000_000.0}):
             self.assertTrue(DrawdownGuard.is_weekly_limit_reached(self.conn))
 
     # -- Profit lock --

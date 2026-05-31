@@ -321,9 +321,9 @@ class TestSignalBlocker(unittest.TestCase):
         from datetime import datetime, timezone
         conn = _make_in_memory_db()
         today_ts = datetime.now(timezone.utc).isoformat()
-        # Loss of 400 USDT; nominal limit = 0.03 * 10_000 = 300 → 400 > 300 → block
+        # Loss of 400_000 KRW; nominal limit = 0.03 * 10_000_000 = 300_000 → 400_000 > 300_000 → block
         _insert_position(conn, "pos-1", "BTCUSDT", status="closed", side="long",
-                         entry_price="100.0", exit_price="60.0", quantity="10.0",
+                         entry_price="100000.0", exit_price="60000.0", quantity="10.0",
                          closed_at=today_ts)
         blocker = _make_blocker(conn=conn)
         config = SimpleNamespace(daily_loss_limit=0.03, max_positions=3)
@@ -381,7 +381,7 @@ class TestSignalBlockerDynamicLimit:
     def test_ranging_adx_tightens_limit(self):
         # 4 open positions; base=5; ADX=15 → limit=3 → should block
         conn = self._make_conn_with_open(4)
-        blocker = SignalBlocker(conn=conn, gap_detector=_make_gap_detector(), btc_adx=15.0)
+        blocker = SignalBlocker(conn=conn, gap_detector=_make_gap_detector(), market_adx=15.0)
         config = self._mock_env(base=5)
         with (
             patch.object(MarketShockDetector, "current_level", return_value="NORMAL"),
@@ -396,7 +396,7 @@ class TestSignalBlockerDynamicLimit:
     def test_ranging_adx_allows_under_dynamic_limit(self):
         # 2 open positions; base=5; ADX=15 → limit=3 → should NOT block
         conn = self._make_conn_with_open(2)
-        blocker = SignalBlocker(conn=conn, gap_detector=_make_gap_detector(), btc_adx=15.0)
+        blocker = SignalBlocker(conn=conn, gap_detector=_make_gap_detector(), market_adx=15.0)
         config = self._mock_env(base=5)
         with (
             patch.object(MarketShockDetector, "current_level", return_value="NORMAL"),
@@ -409,7 +409,7 @@ class TestSignalBlockerDynamicLimit:
     def test_trending_adx_uses_full_limit(self):
         # 4 open positions; base=5; ADX=30 → limit=5 → should NOT block
         conn = self._make_conn_with_open(4)
-        blocker = SignalBlocker(conn=conn, gap_detector=_make_gap_detector(), btc_adx=30.0)
+        blocker = SignalBlocker(conn=conn, gap_detector=_make_gap_detector(), market_adx=30.0)
         config = self._mock_env(base=5)
         with (
             patch.object(MarketShockDetector, "current_level", return_value="NORMAL"),
@@ -422,7 +422,7 @@ class TestSignalBlockerDynamicLimit:
     def test_no_btc_adx_uses_base_limit(self):
         # None btc_adx → base limit unchanged
         conn = self._make_conn_with_open(5)
-        blocker = SignalBlocker(conn=conn, gap_detector=_make_gap_detector(), btc_adx=None)
+        blocker = SignalBlocker(conn=conn, gap_detector=_make_gap_detector(), market_adx=None)
         config = self._mock_env(base=5)
         with (
             patch.object(MarketShockDetector, "current_level", return_value="NORMAL"),
@@ -435,7 +435,7 @@ class TestSignalBlockerDynamicLimit:
     def test_weak_trend_reduces_by_one(self):
         # 4 open; base=5; ADX=22 → limit=4 → blocked
         conn = self._make_conn_with_open(4)
-        blocker = SignalBlocker(conn=conn, gap_detector=_make_gap_detector(), btc_adx=22.0)
+        blocker = SignalBlocker(conn=conn, gap_detector=_make_gap_detector(), market_adx=22.0)
         config = self._mock_env(base=5)
         with (
             patch.object(MarketShockDetector, "current_level", return_value="NORMAL"),

@@ -1,4 +1,4 @@
-"""Unit tests for SignalEngine."""
+"""Unit tests for KRX SignalEngine."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import asyncio
 import sqlite3
 import unittest
 from datetime import datetime, timezone
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from src.signal.base_strategy import SignalResult
 from src.signal.signal_engine import SignalEngine
@@ -58,7 +58,7 @@ def _make_db() -> sqlite3.Connection:
             position_id       TEXT PRIMARY KEY,
             symbol            TEXT NOT NULL,
             side              TEXT NOT NULL,
-            leverage          INTEGER NOT NULL DEFAULT 3,
+            leverage          INTEGER NOT NULL DEFAULT 1,
             entry_price       TEXT NOT NULL DEFAULT '0',
             quantity          TEXT NOT NULL DEFAULT '0',
             liquidation_price TEXT NOT NULL DEFAULT '0',
@@ -70,7 +70,8 @@ def _make_db() -> sqlite3.Connection:
             close_reason      TEXT,
             exit_price        TEXT,
             realized_pnl      TEXT DEFAULT '0',
-            trading_mode      TEXT NOT NULL DEFAULT 'testnet',
+            strategy_name     TEXT,
+            trading_mode      TEXT NOT NULL DEFAULT 'paper',
             opened_at         TEXT NOT NULL DEFAULT (datetime('now')),
             closed_at         TEXT
         );
@@ -88,22 +89,6 @@ def _insert_symbol(conn, symbol, is_active=1):
     conn.commit()
 
 
-def _insert_candles_ms(conn,symbol, count=50, interval="1m"):
-    """Insert *count* dummy candles for *symbol*."""
-    base_ts = datetime(2024, 1, 1, tzinfo=timezone.utc)
-    for i in range(count):
-        ts = f"2024-01-01T{i // 60:02d}:{i % 60:02d}:00+00:00"
-        row_id = f"{symbol}_{interval}_{ts}"
-        conn.execute(
-            "INSERT OR IGNORE INTO klines "
-            "(id, symbol, interval_type, open_time, open, high, low, close, volume, close_time) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (row_id, symbol, interval, ts,
-             "50000", "50500", "49500", "50100", "100.0", ts),
-        )
-    conn.commit()
-
-
 def _insert_candles_ms(conn, symbol, count=50, interval="1m"):
     """Insert candles with Unix-ms timestamps (required by _rows_to_df)."""
     base_ms = 1_704_067_200_000  # 2024-01-01 00:00 UTC
@@ -115,17 +100,17 @@ def _insert_candles_ms(conn, symbol, count=50, interval="1m"):
             "(id, symbol, interval_type, open_time, open, high, low, close, volume, close_time) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (row_id, symbol, interval, ts,
-             "50000", "50500", "49500", "50100", "100.0", str(int(ts) + 59_999)),
+             "80000", "81000", "79000", "80100", "1000.0", str(int(ts) + 59_999)),
         )
     conn.commit()
 
 
-def _insert_position(conn, symbol="BTCUSDT", side="long", quantity="0.1", status="open") -> str:
+def _insert_position(conn, symbol="005930", side="long", quantity="10", status="open") -> str:
     pid = str(__import__("uuid").uuid4())
     conn.execute(
         "INSERT INTO positions (position_id, symbol, side, quantity, entry_price, stop_loss, "
         "initial_stop_loss, status) VALUES (?,?,?,?,?,?,?,?)",
-        (pid, symbol, side, quantity, "50000", "48000", "48000", status),
+        (pid, symbol, side, quantity, "80000", "78000", "78000", status),
     )
     conn.commit()
     return pid
@@ -144,23 +129,14 @@ def _make_strategy_runner(
     return runner
 
 
-def _make_liquidation_guard(passes: bool = True, reason: str = "OK") -> MagicMock:
-    guard = MagicMock()
-    guard.pre_entry_check.return_value = (passes, reason)
-    return guard
-
-
 def _make_engine(
     conn=None,
     signal: SignalResult | None = None,
-    guard_passes: bool = True,
-    guard_reason: str = "OK",
 ) -> tuple[SignalEngine, sqlite3.Connection]:
     if conn is None:
         conn = _make_db()
     runner = _make_strategy_runner(signal)
-    guard = _make_liquidation_guard(guard_passes, guard_reason)
-    engine = SignalEngine(conn=conn, strategy_runner=runner, liquidation_guard=guard)
+    engine = SignalEngine(conn=conn, strategy_runner=runner)
     return engine, conn
 
 
@@ -172,10 +148,9 @@ class TestProcessSymbolNoCandles(unittest.IsolatedAsyncioTestCase):
 
     async def test_returns_none_when_no_candles(self):
         conn = _make_db()
-        _insert_symbol(conn, "BTCUSDT")
-        # No candles inserted
+        _insert_symbol(conn, "005930")
         engine, _ = _make_engine(conn=conn)
-        result = await engine.process_symbol("BTCUSDT")
+        result = await engine.process_symbol("005930")
         self.assertIsNone(result)
 
 
@@ -187,28 +162,26 @@ class TestProcessSymbolNonActionable(unittest.IsolatedAsyncioTestCase):
 
     async def test_non_actionable_not_saved(self):
         conn = _make_db()
-        _insert_symbol(conn, "BTCUSDT")
-        _insert_candles_ms(conn,"BTCUSDT")
+        _insert_symbol(conn, "005930")
+        _insert_candles_ms(conn, "005930")
 
         non_action = SignalResult(signal_type="none", strength_score=0)
         engine, conn = _make_engine(conn=conn, signal=non_action)
 
-        with patch("src.utils.startup_recovery.get_cached_balance", return_value={"USDT": 10_000.0}):
-            await engine.process_symbol("BTCUSDT")
+        await engine.process_symbol("005930")
 
         count = conn.execute("SELECT COUNT(*) FROM signals").fetchone()[0]
         self.assertEqual(count, 0)
 
     async def test_low_strength_not_saved(self):
         conn = _make_db()
-        _insert_symbol(conn, "BTCUSDT")
-        _insert_candles_ms(conn,"BTCUSDT")
+        _insert_symbol(conn, "005930")
+        _insert_candles_ms(conn, "005930")
 
         weak = SignalResult(signal_type="long", strength_score=1)  # < 2 → not actionable
         engine, conn = _make_engine(conn=conn, signal=weak)
 
-        with patch("src.utils.startup_recovery.get_cached_balance", return_value={"USDT": 10_000.0}):
-            await engine.process_symbol("BTCUSDT")
+        await engine.process_symbol("005930")
 
         count = conn.execute("SELECT COUNT(*) FROM signals").fetchone()[0]
         self.assertEqual(count, 0)
@@ -222,21 +195,22 @@ class TestProcessSymbolSavesSignal(unittest.IsolatedAsyncioTestCase):
 
     async def test_actionable_long_saved_not_blocked(self):
         conn = _make_db()
-        _insert_symbol(conn, "BTCUSDT")
-        _insert_candles_ms(conn,"BTCUSDT")
+        _insert_symbol(conn, "005930")
+        _insert_candles_ms(conn, "005930")
 
         good_signal = SignalResult(
             signal_type="long",
             strength_score=2,
-            entry_price=50_000.0,
-            sl=49_000.0,
-            tp1=52_000.0,
+            entry_price=80_000.0,
+            sl=78_000.0,
+            tp1=84_000.0,
             indicators={"rsi": 55.0},
         )
-        engine, conn = _make_engine(conn=conn, signal=good_signal, guard_passes=True)
+        engine, conn = _make_engine(conn=conn, signal=good_signal)
 
-        with patch("src.utils.startup_recovery.get_cached_balance", return_value={"USDT": 10_000.0}):
-            result = await engine.process_symbol("BTCUSDT")
+        with patch("src.utils.startup_recovery.get_cached_balance",
+                   return_value={"availableBalance": 1_000_000.0}):
+            result = await engine.process_symbol("005930")
 
         self.assertIsNotNone(result)
         row = conn.execute("SELECT * FROM signals LIMIT 1").fetchone()
@@ -245,70 +219,70 @@ class TestProcessSymbolSavesSignal(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(row["blocked"], 0)
         self.assertIsNone(row["block_reason"])
 
-    async def test_actionable_short_saved_not_blocked(self):
+    async def test_actionable_short_not_executed_for_krx(self):
+        # KRX long-only: "short" signal from strategy = exit signal, not new entry
         conn = _make_db()
-        _insert_symbol(conn, "ETHUSDT")
-        _insert_candles_ms(conn,"ETHUSDT")
+        _insert_symbol(conn, "005930")
+        _insert_candles_ms(conn, "005930")
 
         short_signal = SignalResult(
             signal_type="short",
             strength_score=3,
-            entry_price=3_000.0,
-            sl=3_100.0,
+            entry_price=80_000.0,
+            sl=82_000.0,
         )
-        engine, conn = _make_engine(conn=conn, signal=short_signal, guard_passes=True)
+        engine, conn = _make_engine(conn=conn, signal=short_signal)
 
-        with patch("src.utils.startup_recovery.get_cached_balance", return_value={"USDT": 10_000.0}):
-            await engine.process_symbol("ETHUSDT")
+        # No open position → short signal is ignored (KRX long-only)
+        await engine.process_symbol("005930")
 
-        row = conn.execute("SELECT signal_type, blocked FROM signals LIMIT 1").fetchone()
-        self.assertEqual(row["signal_type"], "short")
-        self.assertEqual(row["blocked"], 0)
+        count = conn.execute("SELECT COUNT(*) FROM signals").fetchone()[0]
+        self.assertEqual(count, 0)
 
 
 # ---------------------------------------------------------------------------
-# process_symbol: pre_entry_check fails → blocked=1
+# process_symbol: blocked signal → blocked=1 saved
 # ---------------------------------------------------------------------------
 
 class TestProcessSymbolBlocked(unittest.IsolatedAsyncioTestCase):
 
-    async def test_pre_entry_fail_saves_blocked(self):
+    async def test_invalid_sl_saves_blocked(self):
         conn = _make_db()
-        _insert_symbol(conn, "BTCUSDT")
-        _insert_candles_ms(conn,"BTCUSDT")
+        _insert_symbol(conn, "005930")
+        _insert_candles_ms(conn, "005930")
 
-        good_signal = SignalResult(
+        # entry <= sl → invalid → blocked
+        sig = SignalResult(
             signal_type="long",
             strength_score=2,
-            entry_price=50_000.0,
-            sl=49_000.0,
+            entry_price=78_000.0,
+            sl=80_000.0,  # SL above entry → invalid
         )
-        block_reason = "leverage 10x exceeds max 5x"
-        engine, conn = _make_engine(
-            conn=conn,
-            signal=good_signal,
-            guard_passes=False,
-            guard_reason=block_reason,
-        )
+        engine, conn = _make_engine(conn=conn, signal=sig)
 
-        with patch("src.utils.startup_recovery.get_cached_balance", return_value={"USDT": 10_000.0}):
-            await engine.process_symbol("BTCUSDT")
+        with patch("src.utils.startup_recovery.get_cached_balance",
+                   return_value={"availableBalance": 1_000_000.0}):
+            await engine.process_symbol("005930")
 
         row = conn.execute("SELECT blocked, block_reason FROM signals LIMIT 1").fetchone()
         self.assertIsNotNone(row)
         self.assertEqual(row["blocked"], 1)
-        self.assertEqual(row["block_reason"], block_reason)
+        self.assertIn("entry", row["block_reason"].lower())
 
-    async def test_pre_entry_fail_signal_still_returned(self):
+    async def test_blocked_signal_still_returned(self):
         conn = _make_db()
-        _insert_symbol(conn, "BTCUSDT")
-        _insert_candles_ms(conn,"BTCUSDT")
+        _insert_symbol(conn, "005930")
+        _insert_candles_ms(conn, "005930")
 
-        sig = SignalResult(signal_type="long", strength_score=2, entry_price=50_000.0, sl=48_000.0)
-        engine, _ = _make_engine(conn=conn, signal=sig, guard_passes=False, guard_reason="too close")
+        sig = SignalResult(
+            signal_type="long", strength_score=2,
+            entry_price=78_000.0, sl=80_000.0,
+        )
+        engine, _ = _make_engine(conn=conn, signal=sig)
 
-        with patch("src.utils.startup_recovery.get_cached_balance", return_value={"USDT": 10_000.0}):
-            result = await engine.process_symbol("BTCUSDT")
+        with patch("src.utils.startup_recovery.get_cached_balance",
+                   return_value={"availableBalance": 1_000_000.0}):
+            result = await engine.process_symbol("005930")
 
         self.assertIsNotNone(result)
         self.assertEqual(result.signal_type, "long")
@@ -322,14 +296,16 @@ class TestProcessAllSymbols(unittest.IsolatedAsyncioTestCase):
 
     async def test_processes_multiple_symbols(self):
         conn = _make_db()
-        for sym in ("BTCUSDT", "ETHUSDT", "SOLUSDT"):
+        for sym in ("005930", "000660", "035720"):
             _insert_symbol(conn, sym)
-            _insert_candles_ms(conn,sym)
+            _insert_candles_ms(conn, sym)
 
-        sig = SignalResult(signal_type="long", strength_score=2, entry_price=100.0, sl=90.0)
-        engine, conn = _make_engine(conn=conn, signal=sig, guard_passes=True)
+        sig = SignalResult(signal_type="long", strength_score=2,
+                           entry_price=80_000.0, sl=78_000.0)
+        engine, conn = _make_engine(conn=conn, signal=sig)
 
-        with patch("src.utils.startup_recovery.get_cached_balance", return_value={"USDT": 10_000.0}):
+        with patch("src.utils.startup_recovery.get_cached_balance",
+                   return_value={"availableBalance": 1_000_000.0}):
             results = await engine.process_all_symbols()
 
         self.assertEqual(len(results), 3)
@@ -338,48 +314,47 @@ class TestProcessAllSymbols(unittest.IsolatedAsyncioTestCase):
 
     async def test_inactive_symbol_not_processed(self):
         conn = _make_db()
-        _insert_symbol(conn, "BTCUSDT", is_active=1)
-        _insert_symbol(conn, "XRPUSDT", is_active=0)
-        _insert_candles_ms(conn,"BTCUSDT")
-        _insert_candles_ms(conn,"XRPUSDT")
+        _insert_symbol(conn, "005930", is_active=1)
+        _insert_symbol(conn, "000660", is_active=0)
+        _insert_candles_ms(conn, "005930")
+        _insert_candles_ms(conn, "000660")
 
-        sig = SignalResult(signal_type="long", strength_score=2, entry_price=100.0, sl=90.0)
+        sig = SignalResult(signal_type="long", strength_score=2,
+                           entry_price=80_000.0, sl=78_000.0)
         engine, conn = _make_engine(conn=conn, signal=sig)
 
-        with patch("src.utils.startup_recovery.get_cached_balance", return_value={"USDT": 10_000.0}):
+        with patch("src.utils.startup_recovery.get_cached_balance",
+                   return_value={"availableBalance": 1_000_000.0}):
             results = await engine.process_all_symbols()
 
-        self.assertEqual(len(results), 1)  # only BTCUSDT
+        self.assertEqual(len(results), 1)
 
     async def test_empty_symbols_returns_empty_list(self):
-        conn = _make_db()  # no symbols
+        conn = _make_db()
         engine, _ = _make_engine(conn=conn)
         results = await engine.process_all_symbols()
         self.assertEqual(results, [])
 
     async def test_one_symbol_error_does_not_abort_others(self):
-        """Exception in one symbol must not prevent other symbols from processing."""
         conn = _make_db()
-        for sym in ("BTCUSDT", "ETHUSDT"):
+        for sym in ("005930", "000660"):
             _insert_symbol(conn, sym)
-            _insert_candles_ms(conn,sym)
+            _insert_candles_ms(conn, sym)
 
         runner = MagicMock()
         runner.get_timeframe.return_value = "1m"
         runner.get_active_strategy_name.return_value = "test"
-        # BTCUSDT raises, ETHUSDT returns good signal
-        good_sig = SignalResult(signal_type="long", strength_score=2, entry_price=100.0, sl=90.0)
+        runner.get_symbol_strategy_name.return_value = "test"
+        good_sig = SignalResult(signal_type="long", strength_score=2,
+                                entry_price=80_000.0, sl=78_000.0)
         runner.run.side_effect = [Exception("strategy crash"), good_sig]
 
-        guard = _make_liquidation_guard(True)
-        engine = SignalEngine(conn=conn, strategy_runner=runner, liquidation_guard=guard)
+        engine = SignalEngine(conn=conn, strategy_runner=runner)
 
-        with patch("src.utils.startup_recovery.get_cached_balance", return_value={"USDT": 10_000.0}):
+        with patch("src.utils.startup_recovery.get_cached_balance",
+                   return_value={"availableBalance": 1_000_000.0}):
             results = await engine.process_all_symbols()
 
-        # ETHUSDT should still produce a result (or None from exception handling)
-        # Either 0 or 1 results depending on which symbol errored —
-        # the important thing is no unhandled exception propagated
         self.assertIsInstance(results, list)
 
 
@@ -392,15 +367,13 @@ class TestTimeframeResolution(unittest.TestCase):
     def test_uses_strategy_runner_timeframe(self):
         conn = _make_db()
         runner = _make_strategy_runner(timeframe="1h")
-        guard = _make_liquidation_guard()
-        engine = SignalEngine(conn=conn, strategy_runner=runner, liquidation_guard=guard)
+        engine = SignalEngine(conn=conn, strategy_runner=runner)
         self.assertEqual(engine._get_timeframe(), "1h")
 
     def test_defaults_to_1m_when_no_get_timeframe(self):
         conn = _make_db()
-        runner = MagicMock(spec=[])  # spec=[] means no attributes
-        guard = _make_liquidation_guard()
-        engine = SignalEngine(conn=conn, strategy_runner=runner, liquidation_guard=guard)
+        runner = MagicMock(spec=[])
+        engine = SignalEngine(conn=conn, strategy_runner=runner)
         self.assertEqual(engine._get_timeframe(), "1m")
 
 
@@ -412,86 +385,78 @@ class TestExecuteExit(unittest.IsolatedAsyncioTestCase):
 
     def _make_om(self):
         om = MagicMock()
-        om.market_close.return_value = {"id": "order123"}
+        om.market_close = AsyncMock(return_value={"id": "order123"})
         om._telegram = None
         return om
 
-    def test_long_position_closed_on_short_signal(self):
+    async def test_long_position_closed_on_exit(self):
         conn = _make_db()
-        pid = _insert_position(conn, "BTCUSDT", side="long", quantity="0.1")
+        pid = _insert_position(conn, "005930", side="long", quantity="10")
         om = self._make_om()
         engine = SignalEngine(conn=conn,
                               strategy_runner=_make_strategy_runner(),
-                              liquidation_guard=_make_liquidation_guard(),
                               order_manager=om)
 
         pos_row = conn.execute(
             "SELECT side, quantity, entry_price FROM positions WHERE position_id=?", (pid,)
         ).fetchone()
-        engine._execute_exit("BTCUSDT", pos_row, "short")
+        await engine._execute_exit("005930", pos_row)
 
-        om.market_close.assert_called_once_with(
-            symbol="BTCUSDT", side="sell", quantity=0.1, position_side="long"
-        )
+        om.market_close.assert_called_once_with("005930", 10)
         status = conn.execute(
             "SELECT status, close_reason FROM positions WHERE position_id=?", (pid,)
         ).fetchone()
         self.assertEqual(status["status"], "closed")
         self.assertEqual(status["close_reason"], "strategy_exit")
 
-    def test_short_position_closed_on_long_signal(self):
+    async def test_short_position_exit(self):
         conn = _make_db()
-        pid = _insert_position(conn, "ETHUSDT", side="short", quantity="1.5")
+        pid = _insert_position(conn, "000660", side="short", quantity="15")
         om = self._make_om()
         engine = SignalEngine(conn=conn,
                               strategy_runner=_make_strategy_runner(),
-                              liquidation_guard=_make_liquidation_guard(),
                               order_manager=om)
 
         pos_row = conn.execute(
             "SELECT side, quantity, entry_price FROM positions WHERE position_id=?", (pid,)
         ).fetchone()
-        engine._execute_exit("ETHUSDT", pos_row, "long")
+        await engine._execute_exit("000660", pos_row)
 
-        om.market_close.assert_called_once_with(
-            symbol="ETHUSDT", side="buy", quantity=1.5, position_side="short"
-        )
+        om.market_close.assert_called_once_with("000660", 15)
         status = conn.execute("SELECT status FROM positions WHERE position_id=?", (pid,)).fetchone()
         self.assertEqual(status["status"], "closed")
 
-    def test_no_order_manager_skips_without_crash(self):
+    async def test_no_order_manager_skips_without_crash(self):
         conn = _make_db()
-        pid = _insert_position(conn, "BTCUSDT", side="long")
+        pid = _insert_position(conn, "005930", side="long", quantity="5")
         engine = SignalEngine(conn=conn,
                               strategy_runner=_make_strategy_runner(),
-                              liquidation_guard=_make_liquidation_guard(),
                               order_manager=None)
 
         pos_row = conn.execute(
             "SELECT side, quantity, entry_price FROM positions WHERE position_id=?", (pid,)
         ).fetchone()
-        engine._execute_exit("BTCUSDT", pos_row, "short")  # must not raise
+        await engine._execute_exit("005930", pos_row)  # must not raise
 
         status = conn.execute("SELECT status FROM positions WHERE position_id=?", (pid,)).fetchone()
-        self.assertEqual(status["status"], "open")  # DB unchanged when no OM
+        self.assertEqual(status["status"], "open")
 
-    def test_market_close_failure_leaves_db_open(self):
+    async def test_market_close_failure_leaves_db_open(self):
         conn = _make_db()
-        pid = _insert_position(conn, "BTCUSDT", side="long")
+        pid = _insert_position(conn, "005930", side="long", quantity="5")
         om = self._make_om()
-        om.market_close.side_effect = RuntimeError("exchange error")
+        om.market_close.side_effect = RuntimeError("KIS error")
         engine = SignalEngine(conn=conn,
                               strategy_runner=_make_strategy_runner(),
-                              liquidation_guard=_make_liquidation_guard(),
                               order_manager=om)
 
         pos_row = conn.execute(
             "SELECT side, quantity, entry_price FROM positions WHERE position_id=?", (pid,)
         ).fetchone()
-        engine._execute_exit("BTCUSDT", pos_row, "short")  # must not raise
+        await engine._execute_exit("005930", pos_row)  # must not raise
 
         status = conn.execute("SELECT status FROM positions WHERE position_id=?", (pid,)).fetchone()
-        self.assertEqual(status["status"], "open")  # not updated on failure
+        self.assertEqual(status["status"], "open")
 
 
 # ---------------------------------------------------------------------------
@@ -501,173 +466,122 @@ class TestExecuteExit(unittest.IsolatedAsyncioTestCase):
 class TestProcessSymbolWithOpenPosition(unittest.IsolatedAsyncioTestCase):
 
     async def test_reversal_signal_triggers_exit(self):
-        """open long + short signal → _execute_exit called, no _persist_signal."""
         conn = _make_db()
-        _insert_symbol(conn, "BTCUSDT")
-        _insert_candles_ms(conn, "BTCUSDT")
-        _insert_position(conn, "BTCUSDT", side="long")
+        _insert_symbol(conn, "005930")
+        _insert_candles_ms(conn, "005930")
+        _insert_position(conn, "005930", side="long", quantity="10")
 
         reversal = SignalResult(signal_type="short", strength_score=3,
-                                entry_price=49_000.0, sl=51_000.0)
-        engine, conn = _make_engine(conn=conn, signal=reversal)
+                                entry_price=79_000.0, sl=81_000.0)
+        runner = _make_strategy_runner(reversal)
+        engine = SignalEngine(conn=conn, strategy_runner=runner)
         om = MagicMock()
-        om.market_close.return_value = {"id": "x"}
+        om.market_close = AsyncMock(return_value={"id": "x"})
         om._telegram = None
         engine._order_manager = om
 
-        await engine.process_symbol("BTCUSDT")
+        await engine.process_symbol("005930")
 
         om.market_close.assert_called_once()
-        # DB position should be closed
         row = conn.execute(
-            "SELECT status FROM positions WHERE symbol='BTCUSDT'"
+            "SELECT status FROM positions WHERE symbol='005930'"
         ).fetchone()
         self.assertEqual(row["status"], "closed")
-        # No new entry signal persisted
         count = conn.execute("SELECT COUNT(*) FROM signals").fetchone()[0]
         self.assertEqual(count, 0)
 
     async def test_same_direction_skips_entry(self):
-        """open long + long signal → no exit, no new entry persisted."""
         conn = _make_db()
-        _insert_symbol(conn, "BTCUSDT")
-        _insert_candles_ms(conn, "BTCUSDT")
-        _insert_position(conn, "BTCUSDT", side="long")
+        _insert_symbol(conn, "005930")
+        _insert_candles_ms(conn, "005930")
+        _insert_position(conn, "005930", side="long", quantity="10")
 
         same_dir = SignalResult(signal_type="long", strength_score=3,
-                                entry_price=51_000.0, sl=49_000.0)
-        engine, conn = _make_engine(conn=conn, signal=same_dir)
+                                entry_price=81_000.0, sl=79_000.0)
+        runner = _make_strategy_runner(same_dir)
+        engine = SignalEngine(conn=conn, strategy_runner=runner)
         om = MagicMock()
+        om.market_close = AsyncMock()
         engine._order_manager = om
 
-        await engine.process_symbol("BTCUSDT")
+        await engine.process_symbol("005930")
 
         om.market_close.assert_not_called()
         count = conn.execute("SELECT COUNT(*) FROM signals").fetchone()[0]
         self.assertEqual(count, 0)
 
     async def test_no_open_position_normal_entry_flow(self):
-        """No open position + long signal → _persist_signal called (entry flow)."""
         conn = _make_db()
-        _insert_symbol(conn, "BTCUSDT")
-        _insert_candles_ms(conn, "BTCUSDT")
-        # No position inserted
+        _insert_symbol(conn, "005930")
+        _insert_candles_ms(conn, "005930")
 
         long_sig = SignalResult(signal_type="long", strength_score=3,
-                                entry_price=50_000.0, sl=48_000.0)
-        engine, conn = _make_engine(conn=conn, signal=long_sig, guard_passes=False,
-                                    guard_reason="test_block")
+                                entry_price=80_000.0, sl=78_000.0)
+        engine, conn = _make_engine(conn=conn, signal=long_sig)
 
         with patch("src.utils.startup_recovery.get_cached_balance",
-                   return_value={"availableBalance": "10000"}):
-            await engine.process_symbol("BTCUSDT")
+                   return_value={"availableBalance": 1_000_000.0}):
+            await engine.process_symbol("005930")
 
         count = conn.execute("SELECT COUNT(*) FROM signals").fetchone()[0]
         self.assertEqual(count, 1)
 
 
 # ---------------------------------------------------------------------------
-# Min-notional enforcement in _execute_signal
+# _execute_signal: KRX position sizing
 # ---------------------------------------------------------------------------
 
-class TestMinNotional(unittest.TestCase):
-    """_execute_signal must raise quantity when notional < $6."""
+class TestExecuteSignal(unittest.IsolatedAsyncioTestCase):
 
     def _make_engine_with_om(self):
         conn = _make_db()
         om = MagicMock()
-        om.create_order.return_value = {"id": "x", "filled": 0.0, "average": 0.01}
-        om._exchange.fetch_balance.return_value = {"USDT": {"free": 500.0}}
+        om.submit_and_confirm = AsyncMock(return_value={
+            "broker_order_id": "KIS001", "confirmed": True,
+        })
         om._telegram = None
         runner = _make_strategy_runner()
-        guard = _make_liquidation_guard(passes=True)
-        engine = SignalEngine(conn=conn, strategy_runner=runner,
-                              liquidation_guard=guard, order_manager=om)
+        engine = SignalEngine(conn=conn, strategy_runner=runner, order_manager=om)
         return engine, conn, om
 
-    def test_tiny_notional_raised_to_minimum(self):
-        """entry_price=0.01, atr=0.001 → raw qty notional ≈ $0.25 → raised to $6."""
+    async def test_executes_buy_order_for_valid_signal(self):
         engine, conn, om = self._make_engine_with_om()
 
         from src.utils.config import load_config
         config = load_config()
-
-        result = SignalResult(
-            signal_type="long",
-            strength_score=3,
-            entry_price=0.01,
-            sl=0.009,
-            tp1=0.012,
-            indicators={"atr": 0.001},
-        )
-        with patch("src.utils.startup_recovery.get_cached_balance",
-                   return_value={"availableBalance": "500"}):
-            engine._execute_signal("PLAYUSDT", result, leverage=3, balance=500.0, config=config)
-
-        om.create_order.assert_called()
-        entry_call = om.create_order.call_args_list[0]
-        qty_used = entry_call.kwargs.get("quantity") or entry_call.args[3]
-        notional = qty_used * 0.01
-        self.assertGreaterEqual(notional, 5.0, f"notional ${notional:.2f} still below $5")
-
-    def test_bracket_exceeded_retries_at_half_qty(self):
-        """On -2027 first attempt, retries with qty/2; second attempt succeeds."""
-        engine, conn, om = self._make_engine_with_om()
-        from src.utils.config import load_config
-        config = load_config()
-
-        call_count = {"n": 0}
-        def _side_effect(*args, **kwargs):
-            call_count["n"] += 1
-            if call_count["n"] == 1:
-                raise Exception('binanceusdm {"code":-2027,"msg":"Exceeded"}')
-            return {"id": "retry_order", "filled": 0.0, "average": 50_000.0}
-
-        om.create_order.side_effect = _side_effect
 
         result = SignalResult(
             signal_type="long", strength_score=3,
-            entry_price=50_000.0, sl=48_000.0, tp1=55_000.0,
-            indicators={"atr": 1_000.0},
+            entry_price=80_000.0, sl=78_000.0, tp1=84_000.0,
         )
-        with patch("src.utils.startup_recovery.get_cached_balance",
-                   return_value={"availableBalance": "500"}):
-            engine._execute_signal("BTCUSDT", result, leverage=3, balance=500.0, config=config)
+        await engine._execute_signal("005930", result, 1_000_000.0, config, "rsi_macd")
+        om.submit_and_confirm.assert_called_once()
 
-        self.assertEqual(call_count["n"], 2, "expected exactly 2 create_order calls (1 fail + 1 retry)")
-        # Second call quantity should be <= half of first
-        first_qty = om.create_order.call_args_list[0].kwargs.get("quantity") \
-                    or om.create_order.call_args_list[0].args[3]
-        retry_qty = om.create_order.call_args_list[1].kwargs.get("quantity") \
-                    or om.create_order.call_args_list[1].args[3]
-        # Note: after -2027, side_effect replaces kwargs so we check via call_args_list
-        # Both calls may use positional args — just verify retry_qty <= first_qty * 0.55
-        # (0.55 gives slack for the max(..., min_notional) floor)
-
-    def test_sufficient_notional_unchanged(self):
-        """High-price symbol: notional already > $6 → quantity not changed."""
+    async def test_missing_entry_price_skips_execution(self):
         engine, conn, om = self._make_engine_with_om()
 
         from src.utils.config import load_config
         config = load_config()
 
         result = SignalResult(
-            signal_type="long",
-            strength_score=3,
-            entry_price=50_000.0,
-            sl=48_000.0,
-            tp1=55_000.0,
-            indicators={"atr": 1_000.0},
+            signal_type="long", strength_score=3,
+            entry_price=0.0, sl=78_000.0,  # entry=0 → invalid
         )
-        with patch("src.utils.startup_recovery.get_cached_balance",
-                   return_value={"availableBalance": "500"}):
-            engine._execute_signal("BTCUSDT", result, leverage=3, balance=500.0, config=config)
+        await engine._execute_signal("005930", result, 1_000_000.0, config, "rsi_macd")
+        om.submit_and_confirm.assert_not_called()
 
-        om.create_order.assert_called()
-        entry_call = om.create_order.call_args_list[0]
-        qty_used = entry_call.kwargs.get("quantity") or entry_call.args[3]
-        notional = qty_used * 50_000.0
-        self.assertGreaterEqual(notional, 5.0)
+    async def test_invalid_sl_skips_execution(self):
+        engine, conn, om = self._make_engine_with_om()
+
+        from src.utils.config import load_config
+        config = load_config()
+
+        result = SignalResult(
+            signal_type="long", strength_score=3,
+            entry_price=80_000.0, sl=82_000.0,  # sl > entry → invalid
+        )
+        await engine._execute_signal("005930", result, 1_000_000.0, config, "rsi_macd")
+        om.submit_and_confirm.assert_not_called()
 
 
 if __name__ == "__main__":

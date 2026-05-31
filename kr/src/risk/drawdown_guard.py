@@ -79,9 +79,9 @@ class MarketShockDetector:
         elif oi_change_5m < -0.02:
             score += 1
 
-        if large_liquidations_5m > 10_000_000_000:
+        if large_liquidations_5m > 10_000_000:
             score += 3
-        elif large_liquidations_5m > 1_000_000_000:
+        elif large_liquidations_5m > 1_000_000:
             score += 1
 
         if abs(price_change_1m) > 0.03:
