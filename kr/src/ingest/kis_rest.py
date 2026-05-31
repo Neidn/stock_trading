@@ -672,47 +672,53 @@ class KISRestClient:
         min_change: float = 2.0,
         max_change: float = 30.0,
     ) -> list[dict]:
-        """Fetch top stocks by price change rate (등락률 순위, 상승 only).
+        """Fetch top stocks by after-hours price change rate (시간외등락율순위, 상승 only).
+
+        Uses the after-hours single-price session change vs previous close.
+        At 08:00 KST (screener run time) this reflects the prior day's
+        after-hours moves — strong pre-market momentum signal.
 
         Args:
-            market: ``'J'`` for all KRX. ``'NX'`` for NXT.
+            market: ``'J'`` for all KRX (KOSPI + KOSDAQ).
             top_n: Max results (API max = 30).
-            min_change: Minimum positive change % (e.g. 2.0 = +2%).
-            max_change: Maximum change % cap (filters out limit-up noise).
+            min_change: Minimum after-hours change % to include.
+            max_change: Upper cap to filter out limit-up noise.
 
         Returns:
             List of dicts: symbol, name, price, change_pct, volume, trade_amount.
         """
         data = await self._get(
-            "/uapi/domestic-stock/v1/quotations/fluctuation-rank",
-            tr_id="FHPST01700000",
+            "/uapi/domestic-stock/v1/ranking/overtime-fluctuation",
+            tr_id="FHPST02340000",
             params={
-                "FID_COND_MRKT_DIV_CODE": market,
-                "FID_COND_SCR_DIV_CODE": "20170",
-                "FID_INPUT_ISCD": "0000",
-                "FID_RANK_SORT_CLS_CODE": "0",
-                "FID_INPUT_CNT_1": "0",
-                "FID_PRC_CLS_CODE": "0",
-                "FID_INPUT_PRICE_1": "",
-                "FID_INPUT_PRICE_2": "",
-                "FID_VOL_CNT": "",
-                "FID_TRGT_CLS_CODE": "111111111",
-                "FID_TRGT_EXLS_CLS_CODE": "0110011101",
-                "FID_DIV_CLS_CODE": "0",
-                "FID_RSFL_RATE1": str(min_change),
-                "FID_RSFL_RATE2": str(max_change),
+                "fid_cond_mrkt_div_code": market,
+                "fid_mrkt_cls_code": "",
+                "fid_cond_scr_div_code": "20234",
+                "fid_input_iscd": "0000",
+                "fid_div_cls_code": "2",
+                "fid_input_price_1": "",
+                "fid_input_price_2": "",
+                "fid_vol_cnt": "",
+                "fid_trgt_cls_code": "",
+                "fid_trgt_exls_cls_code": "",
             },
         )
         result = []
-        for item in (data.get("output", []) or [])[:top_n]:
+        for item in (data.get("output2", []) or [])[:top_n]:
             symbol = item.get("mksc_shrn_iscd", "").strip()
             if not symbol:
+                continue
+            try:
+                change_pct = float(item.get("ovtm_untp_prdy_ctrt", "0") or "0")
+            except ValueError:
+                change_pct = 0.0
+            if change_pct < min_change or change_pct > max_change:
                 continue
             result.append({
                 "symbol":       symbol,
                 "name":         item.get("hts_kor_isnm", "").strip(),
                 "price":        item.get("stck_prpr", "0"),
-                "change_pct":   item.get("prdy_ctrt", "0"),
+                "change_pct":   item.get("ovtm_untp_prdy_ctrt", "0"),
                 "volume":       item.get("acml_vol", "0"),
                 "trade_amount": item.get("acml_tr_pbmn", "0"),
                 "market_code":  market,
