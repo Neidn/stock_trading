@@ -192,6 +192,8 @@ class KISRestClient:
             if resp.status == 429:
                 raise RateLimitError(f"KIS rate limit {resp.url}")
             data = await resp.json(content_type=None)
+        if not isinstance(data, dict):
+            raise NetworkError(f"KIS non-dict response (http={resp.status}): {data!r}")
         if data.get("rt_cd", "-1") != "0":
             raise NetworkError(
                 f"KIS error rt_cd={data.get('rt_cd')} msg={data.get('msg1', '')}"
