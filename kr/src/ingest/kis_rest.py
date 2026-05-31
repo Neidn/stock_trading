@@ -97,6 +97,7 @@ class KISRestClient:
 
         self._token: str | None = None
         self._token_expires_at: float = 0.0
+        self._token_lock: asyncio.Lock = asyncio.Lock()
         self._rate = _RateLimiter()
         self._session: aiohttp.ClientSession | None = None
         self._last_req_at: float = 0.0
@@ -130,7 +131,10 @@ class KISRestClient:
     async def _ensure_token(self) -> str:
         if self._token and time.time() < self._token_expires_at - _TOKEN_BUFFER_SEC:
             return self._token
-        await self._fetch_token()
+        async with self._token_lock:
+            if self._token and time.time() < self._token_expires_at - _TOKEN_BUFFER_SEC:
+                return self._token
+            await self._fetch_token()
         assert self._token
         return self._token
 
@@ -584,6 +588,7 @@ class KISRestClient:
                 "fid_div_cls_code": "0",
                 "fid_rsfl_rate1": "",
                 "fid_rsfl_rate2": "",
+                "fid_prc_cls_code": "0",
             },
         )
         result = []
