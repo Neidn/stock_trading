@@ -72,18 +72,32 @@ class KISRestClient:
 
     Credentials and trading mode are resolved from environment variables::
 
-        KIS_APP_KEY      — app key (paper or live)
-        KIS_APP_SECRET   — app secret
-        KIS_ACCOUNT_NO   — 계좌번호 (format: "XXXXXXXXXX-XX")
-        TRADING_MODE     — "paper" (모의투자) | "live"
+        KIS_APP_KEY           — order app key (paper or live)
+        KIS_APP_SECRET        — order app secret
+        KIS_DATA_APP_KEY      — data app key (실전투자; falls back to KIS_APP_KEY)
+        KIS_DATA_APP_SECRET   — data app secret (실전투자; falls back to KIS_APP_SECRET)
+        KIS_ACCOUNT_NO        — 계좌번호 (format: "XXXXXXXXXX-XX")
+        TRADING_MODE          — "paper" (모의투자) | "live"
+
+    GET (market data) always targets openapi.koreainvestment.com (live data server)
+    using the data credentials.  POST (orders) targets the server determined by
+    TRADING_MODE using the order credentials.
     """
 
     def __init__(self) -> None:
         mode = os.getenv("TRADING_MODE", "paper").strip().lower()
         self._paper = mode != "live"
         self._base = _PAPER_BASE if self._paper else _LIVE_BASE
+
+        # Order credentials (paper or live)
         self._app_key = os.getenv("KIS_APP_KEY", "")
         self._app_secret = os.getenv("KIS_APP_SECRET", "")
+
+        # Data credentials — fall back to order credentials if not set.
+        # Market data APIs (rankings, quotes) only exist on the live server;
+        # the paper server (openapivts) returns 404 for these endpoints.
+        self._data_app_key = os.getenv("KIS_DATA_APP_KEY", "").strip() or self._app_key
+        self._data_app_secret = os.getenv("KIS_DATA_APP_SECRET", "").strip() or self._app_secret
 
         raw_acct = os.getenv("KIS_ACCOUNT_NO", "")
         # Accept both "XXXXXXXXXX-XX" and "XXXXXXXXXXXX" formats
@@ -95,9 +109,16 @@ class KISRestClient:
             self._acct_no = raw_acct[:10]
             self._acct_prod = raw_acct[10:] or "01"
 
+        # Order token (paper or live server)
         self._token: str | None = None
         self._token_expires_at: float = 0.0
         self._token_lock: asyncio.Lock = asyncio.Lock()
+
+        # Data token (always live server)
+        self._data_token: str | None = None
+        self._data_token_expires_at: float = 0.0
+        self._data_token_lock: asyncio.Lock = asyncio.Lock()
+
         self._rate = _RateLimiter()
         self._session: aiohttp.ClientSession | None = None
         self._last_req_at: float = 0.0
@@ -158,6 +179,35 @@ class KISRestClient:
         self._token_expires_at = time.time() + data.get("expires_in", 86400)
         logger.info("kis.token.ok expires_in=%s", data.get("expires_in"))
 
+    async def _ensure_data_token(self) -> str:
+        if self._data_token and time.time() < self._data_token_expires_at - _TOKEN_BUFFER_SEC:
+            return self._data_token
+        async with self._data_token_lock:
+            if self._data_token and time.time() < self._data_token_expires_at - _TOKEN_BUFFER_SEC:
+                return self._data_token
+            await self._fetch_data_token()
+        assert self._data_token
+        return self._data_token
+
+    async def _fetch_data_token(self) -> None:
+        logger.info("kis.data_token.fetch")
+        assert self._session
+        async with self._session.post(
+            f"{_LIVE_BASE}/oauth2/tokenP",
+            json={
+                "grant_type": "client_credentials",
+                "appkey": self._data_app_key,
+                "appsecret": self._data_app_secret,
+            },
+        ) as resp:
+            if resp.status != 200:
+                text = await resp.text()
+                raise NetworkError(f"KIS data token fetch failed {resp.status}: {text}")
+            data = await resp.json(content_type=None)
+        self._data_token = data["access_token"]
+        self._data_token_expires_at = time.time() + data.get("expires_in", 86400)
+        logger.info("kis.data_token.ok expires_in=%s", data.get("expires_in"))
+
     # ------------------------------------------------------------------
     # Internal request
     # ------------------------------------------------------------------
@@ -168,6 +218,16 @@ class KISRestClient:
             "authorization": f"Bearer {token}",
             "appkey": self._app_key,
             "appsecret": self._app_secret,
+            "tr_id": tr_id,
+            "custtype": "P",
+        }
+
+    def _data_headers(self, tr_id: str, token: str) -> dict[str, str]:
+        return {
+            "content-type": "application/json; charset=utf-8",
+            "authorization": f"Bearer {token}",
+            "appkey": self._data_app_key,
+            "appsecret": self._data_app_secret,
             "tr_id": tr_id,
             "custtype": "P",
         }
@@ -183,10 +243,10 @@ class KISRestClient:
     async def _get(self, path: str, tr_id: str, params: dict[str, str]) -> dict:
         assert self._session
         await self._throttle()
-        token = await self._ensure_token()
+        token = await self._ensure_data_token()
         async with self._session.get(
-            f"{self._base}{path}",
-            headers=self._headers(tr_id, token),
+            f"{_LIVE_BASE}{path}",
+            headers=self._data_headers(tr_id, token),
             params=params,
         ) as resp:
             if resp.status == 429:
