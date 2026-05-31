@@ -70,14 +70,13 @@ class ScreenerJob:
         logger.info("screener.start")
 
         # Stage 1: fetch rankings.
-        # fluctuation endpoint (FHPST01700000) only supports market J (KOSPI).
-        vol_j, vol_q, flu_j = await asyncio.gather(
+        # market='J' covers all KRX (KOSPI + KOSDAQ); no separate Q call needed.
+        vol_j, flu_j = await asyncio.gather(
             self._safe_fetch_volume("J"),
-            self._safe_fetch_volume("Q"),
             self._safe_fetch_fluctuation("J"),
         )
 
-        vol_all = vol_j + vol_q
+        vol_all = vol_j
         flu_all = flu_j
 
         flu_set: set[str] = {s["symbol"] for s in flu_all}

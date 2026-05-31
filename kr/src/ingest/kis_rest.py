@@ -626,36 +626,32 @@ class KISRestClient:
         """Fetch top stocks by trading volume (거래량 순위).
 
         Args:
-            market: ``'J'`` for KOSPI+주식, ``'Q'`` for KOSDAQ.
-            top_n: Max results to return.
+            market: ``'J'`` for all KRX (KOSPI + KOSDAQ). ``'NX'`` for NXT.
+            top_n: Max results to return (API max = 30).
 
         Returns:
             List of dicts: symbol, name, price, change_pct, volume,
             trade_amount (원), market_code.
         """
         data = await self._get(
-            "/uapi/domestic-stock/v1/ranking/volume",
+            "/uapi/domestic-stock/v1/quotations/volume-rank",
             tr_id="FHPST01710000",
             params={
-                "fid_cond_mrkt_div_code": market,
-                "fid_cond_scr_div_code": "20171",
-                "fid_input_iscd": "0001",
-                "fid_input_cnt_1": "0",
-                "fid_prd_div_code": "",
-                "fid_input_price_1": "",
-                "fid_input_price_2": "",
-                "fid_vol_cnt": "",
-                "fid_trgt_cls_code": "111111111",
-                "fid_trgt_exls_cls_code": "000000",
-                "fid_div_cls_code": "0",
-                "fid_rsfl_rate1": "",
-                "fid_rsfl_rate2": "",
-                "fid_prc_cls_code": "0",
+                "FID_COND_MRKT_DIV_CODE": market,
+                "FID_COND_SCR_DIV_CODE": "20171",
+                "FID_INPUT_ISCD": "0000",
+                "FID_DIV_CLS_CODE": "0",
+                "FID_BLNG_CLS_CODE": "0",
+                "FID_TRGT_CLS_CODE": "111111111",
+                "FID_TRGT_EXLS_CLS_CODE": "0110011101",
+                "FID_INPUT_PRICE_1": "",
+                "FID_INPUT_PRICE_2": "",
+                "FID_VOL_CNT": "",
             },
         )
         result = []
         for item in (data.get("output", []) or [])[:top_n]:
-            symbol = item.get("stck_shrn_iscd", "").strip()
+            symbol = item.get("mksc_shrn_iscd", "").strip()
             if not symbol:
                 continue
             result.append({
@@ -664,7 +660,7 @@ class KISRestClient:
                 "price":        item.get("stck_prpr", "0"),
                 "change_pct":   item.get("prdy_ctrt", "0"),
                 "volume":       item.get("acml_vol", "0"),
-                "trade_amount": item.get("acml_tr_pbmn", "0"),  # 원
+                "trade_amount": item.get("acml_tr_pbmn", "0"),
                 "market_code":  market,
             })
         return result
@@ -679,8 +675,8 @@ class KISRestClient:
         """Fetch top stocks by price change rate (등락률 순위, 상승 only).
 
         Args:
-            market: ``'J'`` for KOSPI, ``'Q'`` for KOSDAQ.
-            top_n: Max results.
+            market: ``'J'`` for all KRX. ``'NX'`` for NXT.
+            top_n: Max results (API max = 30).
             min_change: Minimum positive change % (e.g. 2.0 = +2%).
             max_change: Maximum change % cap (filters out limit-up noise).
 
@@ -688,29 +684,28 @@ class KISRestClient:
             List of dicts: symbol, name, price, change_pct, volume, trade_amount.
         """
         data = await self._get(
-            "/uapi/domestic-stock/v1/ranking/fluctuation",
+            "/uapi/domestic-stock/v1/quotations/fluctuation-rank",
             tr_id="FHPST01700000",
             params={
-                "fid_cond_mrkt_div_code": market,
-                "fid_cond_scr_div_code": "20170",
-                "fid_input_iscd": "0001",
-                "fid_rank_sort_cls_code": "0",   # 0 = 상승률 순
-                "fid_input_cnt_1": "0",
-                "fid_prd_div_code": "",
-                "fid_input_price_1": "",
-                "fid_input_price_2": "",
-                "fid_vol_cnt": "",
-                "fid_trgt_cls_code": "111111111",
-                "fid_trgt_exls_cls_code": "000000",
-                "fid_div_cls_code": "0",
-                "fid_rsfl_rate1": str(min_change),
-                "fid_rsfl_rate2": str(max_change),
-                "fid_prc_cls_code": "0",
+                "FID_COND_MRKT_DIV_CODE": market,
+                "FID_COND_SCR_DIV_CODE": "20170",
+                "FID_INPUT_ISCD": "0000",
+                "FID_RANK_SORT_CLS_CODE": "0",
+                "FID_INPUT_CNT_1": "0",
+                "FID_PRC_CLS_CODE": "0",
+                "FID_INPUT_PRICE_1": "",
+                "FID_INPUT_PRICE_2": "",
+                "FID_VOL_CNT": "",
+                "FID_TRGT_CLS_CODE": "111111111",
+                "FID_TRGT_EXLS_CLS_CODE": "0110011101",
+                "FID_DIV_CLS_CODE": "0",
+                "FID_RSFL_RATE1": str(min_change),
+                "FID_RSFL_RATE2": str(max_change),
             },
         )
         result = []
         for item in (data.get("output", []) or [])[:top_n]:
-            symbol = item.get("stck_shrn_iscd", "").strip()
+            symbol = item.get("mksc_shrn_iscd", "").strip()
             if not symbol:
                 continue
             result.append({
