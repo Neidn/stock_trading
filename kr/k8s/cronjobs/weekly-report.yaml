@@ -28,7 +28,7 @@ spec:
                 claimName: sqlite-pvc
           containers:
             - name: report
-              image: neidn/stock-trading-kr:latest
+              image: ghcr.io/neidn/stock-trading-kr:latest
               imagePullPolicy: Always
               command: ["python", "-m", "src.jobs.weekly_report"]
               envFrom:

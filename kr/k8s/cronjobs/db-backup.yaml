@@ -28,7 +28,7 @@ spec:
                 claimName: sqlite-pvc
           containers:
             - name: db-backup
-              image: neidn/stock-trading-kr:latest
+              image: ghcr.io/neidn/stock-trading-kr:latest
               imagePullPolicy: Always
               command: ["python", "-m", "src.jobs.db_backup"]
               envFrom:

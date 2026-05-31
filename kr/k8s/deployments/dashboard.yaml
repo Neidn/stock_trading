@@ -25,7 +25,7 @@ spec:
 
       containers:
         - name: dashboard
-          image: neidn/stock-trading-kr:latest
+          image: ghcr.io/neidn/stock-trading-kr:latest
           imagePullPolicy: Always
           command: ["python", "-m", "gunicorn", "--bind", "0.0.0.0:5000", "--workers", "2", "--timeout", "60", "src.monitoring.dashboard:app"]
           ports:

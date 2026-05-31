@@ -25,7 +25,7 @@ spec:
 
       containers:
         - name: data-ingest
-          image: neidn/stock-trading-kr:latest
+          image: ghcr.io/neidn/stock-trading-kr:latest
           imagePullPolicy: Always
           command: ["python", "-m", "src.ingest.main"]
           ports:
