@@ -12,8 +12,6 @@ import sqlite3
 from datetime import date, timedelta
 from typing import TYPE_CHECKING
 
-from src.risk.liquidation_guard import distance_to_liquidation_pct
-
 if TYPE_CHECKING:
     pass
 
@@ -91,14 +89,8 @@ class DailyReportJob:
 
     @staticmethod
     def _liq_distance(pos) -> float | None:
-        try:
-            entry = float(pos["entry_price"])
-            liq = float(pos["liquidation_price"])
-            side = pos["side"]
-            # Use entry price as proxy for current price when no mark price available
-            return distance_to_liquidation_pct(entry, liq, side)
-        except Exception:  # noqa: BLE001
-            return None
+        # KRX spot: no liquidation price — not applicable
+        return None
 
     def _send(self, report: str) -> None:
         if self._telegram is None:

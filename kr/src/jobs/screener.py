@@ -224,6 +224,112 @@ class ScreenerJob:
 
 
 # ---------------------------------------------------------------------------
+# Strategy assignment helpers (imported by strategy_runner)
+# ---------------------------------------------------------------------------
+
+def _discover_strategies() -> list:
+    """Auto-discover all BaseStrategy subclasses in src/signal/strategies/."""
+    import importlib
+    import pkgutil
+
+    import src.signal.strategies as _pkg
+    from src.signal.base_strategy import BaseStrategy
+
+    classes: list = []
+    for _, mod_name, _ in pkgutil.iter_modules(_pkg.__path__):
+        mod = importlib.import_module(f"src.signal.strategies.{mod_name}")
+        for attr_name in dir(mod):
+            obj = getattr(mod, attr_name)
+            if (
+                isinstance(obj, type)
+                and issubclass(obj, BaseStrategy)
+                and obj is not BaseStrategy
+                and obj not in classes
+            ):
+                classes.append(obj)
+    return classes
+
+
+def _classify_regime(indicators: dict) -> str:
+    """Classify market regime from indicator snapshot.
+
+    Returns 'trending' | 'volatile' | 'ranging'.
+    """
+    adx     = float(indicators.get("adx",      0.0) or 0.0)
+    atr_pct = float(indicators.get("atr_pct",  1.0) or 1.0)
+
+    if atr_pct >= 3.0:
+        return "volatile"
+    if adx >= 25.0:
+        return "trending"
+    return "ranging"
+
+
+def _assign_strategy(indicators: dict, strategies: list) -> str:
+    """Pick the best-fit strategy name for current market indicators.
+
+    Filters by ``primary_regimes()``, then ranks by ``suitability_score()``.
+    Falls back to full list if no strategy declares the detected regime.
+    Returns the strategy's ``get_name()`` string.
+    """
+    if not strategies:
+        return "rsi_macd"
+
+    regime = _classify_regime(indicators)
+
+    eligible = [
+        cls for cls in strategies
+        if regime in cls.primary_regimes() or "any" in cls.primary_regimes()
+    ]
+    if not eligible:
+        eligible = strategies
+
+    best_cls = max(eligible, key=lambda cls: cls.suitability_score(indicators))
+    try:
+        return best_cls(params={}).get_name()
+    except Exception:  # noqa: BLE001
+        return best_cls.__name__.lower().replace("strategy", "")
+
+
+def _compute_symbol_indicators(conn, symbol: str) -> dict:
+    """Compute ADX, ATR%, above_sma200 from 1h klines stored in DB.
+
+    Returns safe defaults when fewer than 20 rows are available.
+    """
+    rows = conn.execute(
+        "SELECT high, low, close FROM klines"
+        " WHERE symbol=? AND interval_type='1h'"
+        " ORDER BY open_time DESC LIMIT 250",
+        (symbol,),
+    ).fetchall()
+
+    if len(rows) < 20:
+        return {"adx": 25.0, "atr_pct": 1.0, "above_sma200": False}
+
+    import numpy as np
+
+    def _f(r, idx):
+        return float(r[idx] if isinstance(r, (list, tuple)) else list(r)[idx])
+
+    rows_asc = list(reversed(rows))
+    highs  = np.array([_f(r, 0) for r in rows_asc])
+    lows   = np.array([_f(r, 1) for r in rows_asc])
+    closes = np.array([_f(r, 2) for r in rows_asc])
+
+    try:
+        import talib
+        adx_a = talib.ADX(highs, lows, closes, timeperiod=14)
+        atr_a = talib.ATR(highs, lows, closes, timeperiod=14)
+        adx     = float(adx_a[-1]) if not np.isnan(adx_a[-1]) else 25.0
+        atr_pct = float(atr_a[-1] / closes[-1] * 100) if closes[-1] > 0 else 1.0
+    except Exception:  # noqa: BLE001
+        adx, atr_pct = 25.0, 1.0
+
+    above_sma200 = bool(closes[-1] > np.mean(closes[-200:])) if len(closes) >= 200 else False
+    return {"adx": adx, "atr_pct": atr_pct, "above_sma200": above_sma200}
+
+
+# ---------------------------------------------------------------------------
 # Scoring
 # ---------------------------------------------------------------------------
 
