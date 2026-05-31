@@ -45,6 +45,7 @@ async def main() -> None:
     init_db(db_path)
 
     telegram = get_telegram_bot(conn=conn)
+    health = start_health_server("signal-engine", db_conn=conn)
 
     # Gate: sleep until market opens
     if not is_market_open(buffer_open_sec=0):
@@ -79,8 +80,6 @@ async def main() -> None:
                 kis=kis,
                 telegram_bot=telegram,
             )
-
-            health = start_health_server("signal-engine", db_conn=conn)
 
             stop_event = asyncio.Event()
             loop = asyncio.get_running_loop()

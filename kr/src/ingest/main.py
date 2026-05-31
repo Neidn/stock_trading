@@ -73,6 +73,7 @@ async def main() -> None:
     logger.info("ingest.symbols count=%d symbols=%s", len(symbols), symbols)
 
     bot = get_telegram_bot(conn=conn)
+    health = start_health_server("data-ingest", db_conn=conn)
 
     # Gate: sleep until KRX market opens (09:00 KST)
     if not is_market_open(buffer_open_sec=0):
@@ -96,8 +97,6 @@ async def main() -> None:
             paper=(os.getenv("TRADING_MODE", "paper") != "live"),
             telegram_bot=bot,
         ) as ws:
-            health = start_health_server("data-ingest", db_conn=conn)
-
             for sym in symbols:
                 await ws.subscribe(sym)
 
