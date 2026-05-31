@@ -71,11 +71,6 @@ class StrategyRunner:
         # Per-symbol cache: {strategy_name: (BaseStrategy, loaded_at_monotonic)}
         self._symbol_strategy_cache: dict[str, tuple[BaseStrategy, float]] = {}
         self._CACHE_TTL = 300.0  # re-check DB every 5 min
-        # G2: intraday regime refresh state
-        self._last_btc_adx: float | None = None
-        self._last_regime_check: float = 0.0
-        self._REGIME_CHECK_INTERVAL = 1800.0  # 30 min
-        self._REGIME_ADX_THRESHOLD = 5.0      # re-assign if BTC ADX shifts > 5
 
     # ------------------------------------------------------------------
     # Public API
@@ -96,54 +91,7 @@ class StrategyRunner:
             self._strategy = self._load_strategy(current, self._load_params(current))
             self._symbol_strategy_cache.clear()
 
-        # KRX: regime refresh disabled (no BTC reference symbol in KRX universe)
-
-    def _regime_refresh_if_needed(self) -> None:
-        """Re-assign per-symbol strategies when BTC ADX regime shifts significantly."""
-        now = time.monotonic()
-        if now - self._last_regime_check < self._REGIME_CHECK_INTERVAL:
-            return
-        self._last_regime_check = now
-
-        try:
-            from src.jobs.screener import _compute_symbol_indicators, _assign_strategy, _discover_strategies  # lazy
-            btc_ind = _compute_symbol_indicators(self._conn, "BTCUSDT")
-            current_adx = btc_ind["adx"]
-
-            if self._last_btc_adx is None:
-                self._last_btc_adx = current_adx
-                return
-
-            adx_shift = abs(current_adx - self._last_btc_adx)
-            if adx_shift < self._REGIME_ADX_THRESHOLD:
-                return
-
-            logger.info(
-                "G2 regime refresh: BTC ADX shifted %.1f→%.1f (Δ%.1f>%.1f), re-assigning strategies",
-                self._last_btc_adx, current_adx, adx_shift, self._REGIME_ADX_THRESHOLD,
-            )
-            self._last_btc_adx = current_adx
-
-            strategies = _discover_strategies()
-            rows = self._conn.execute(
-                "SELECT symbol FROM symbols WHERE is_active=1"
-            ).fetchall()
-            symbols = [r[0] if not hasattr(r, "keys") else r["symbol"] for r in rows]
-
-            for symbol in symbols:
-                ind = _compute_symbol_indicators(self._conn, symbol)
-                strategy_name = _assign_strategy(ind, strategies)
-                self._conn.execute(
-                    "UPDATE symbols SET strategy=? WHERE symbol=?",
-                    (strategy_name, symbol),
-                )
-                logger.info("G2 re-assigned [%s]: %s", symbol, strategy_name)
-
-            self._conn.commit()
-            self._symbol_strategy_cache.clear()
-            logger.info("G2 regime refresh complete: %d symbols re-assigned", len(symbols))
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("G2 regime refresh failed (non-fatal): %s", exc)
+        # KRX: regime refresh disabled (no BTC/futures reference in KRX spot universe)
 
     def _get_symbol_strategy(self, symbol: str) -> BaseStrategy:
         """Return per-symbol strategy if set in DB, else global strategy.

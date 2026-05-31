@@ -4,13 +4,10 @@ from __future__ import annotations
 
 import os
 import sqlite3
-import time
 from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
-import pytest
-
 import pytest
 
 from src.signal.base_strategy import SignalResult
@@ -87,109 +84,6 @@ class TestStrategyRunner:
 
         runner.reload("zscore_reversion", {})
         assert runner.get_active_strategy_name() == "zscore_reversion"
-
-
-# ---------------------------------------------------------------------------
-# G2: Intraday regime refresh
-# ---------------------------------------------------------------------------
-
-def _make_conn_with_symbols(symbols: list[str]) -> sqlite3.Connection:
-    conn = sqlite3.connect(":memory:")
-    conn.row_factory = sqlite3.Row
-    conn.executescript("""
-        CREATE TABLE symbols (
-            symbol TEXT PRIMARY KEY,
-            is_active INTEGER NOT NULL DEFAULT 1,
-            strategy TEXT
-        );
-    """)
-    for sym in symbols:
-        conn.execute("INSERT INTO symbols (symbol) VALUES (?)", (sym,))
-    conn.commit()
-    return conn
-
-
-class TestRegimeRefresh:
-    def _make_runner(self, monkeypatch, conn=None):
-        monkeypatch.setenv("ACTIVE_STRATEGY", "rsi_macd")
-        monkeypatch.delenv("STRATEGY_PARAMS", raising=False)
-        return StrategyRunner(conn=conn)
-
-    def test_no_refresh_before_interval(self, monkeypatch):
-        """_regime_refresh_if_needed skips when interval hasn't elapsed."""
-        conn = _make_conn_with_symbols(["BTCUSDT"])
-        runner = self._make_runner(monkeypatch, conn=conn)
-        runner._last_btc_adx = 30.0
-        runner._last_regime_check = time.monotonic()  # just checked
-
-        with patch("src.jobs.screener._compute_symbol_indicators") as mock_ind:
-            runner._regime_refresh_if_needed()
-            mock_ind.assert_not_called()
-
-    def test_no_reassign_when_adx_stable(self, monkeypatch):
-        """No reassignment when BTC ADX shift < threshold."""
-        conn = _make_conn_with_symbols(["BTCUSDT", "ETHUSDT"])
-        runner = self._make_runner(monkeypatch, conn=conn)
-        runner._last_btc_adx = 30.0
-        runner._last_regime_check = 0.0  # force check
-
-        ind_stable = {"adx": 32.0, "atr_pct": 1.0, "above_sma200": False,
-                      "sma_aligned": False, "sma50_slope": 0.0, "adx_change": 0.0}
-        with patch("src.jobs.screener._compute_symbol_indicators", return_value=ind_stable):
-            with patch("src.jobs.screener._assign_strategy") as mock_assign:
-                runner._regime_refresh_if_needed()
-                mock_assign.assert_not_called()
-
-    def test_reassigns_when_adx_shifts_significantly(self, monkeypatch):
-        """Re-assigns all symbols when BTC ADX shifts > threshold."""
-        conn = _make_conn_with_symbols(["BTCUSDT", "ETHUSDT"])
-        runner = self._make_runner(monkeypatch, conn=conn)
-        runner._last_btc_adx = 20.0
-        runner._last_regime_check = 0.0  # force check
-
-        ind_shifted = {"adx": 35.0, "atr_pct": 2.0, "above_sma200": True,
-                       "sma_aligned": False, "sma50_slope": 0.0, "adx_change": 0.0}
-        with patch("src.jobs.screener._compute_symbol_indicators", return_value=ind_shifted):
-            with patch("src.jobs.screener._assign_strategy", return_value="supertrend"):
-                with patch("src.jobs.screener._discover_strategies", return_value=[]):
-                    runner._regime_refresh_if_needed()
-
-        rows = conn.execute("SELECT strategy FROM symbols WHERE strategy IS NOT NULL").fetchall()
-        assert len(rows) == 2
-        assert all(r[0] == "supertrend" for r in rows)
-
-    def test_cache_cleared_after_refresh(self, monkeypatch):
-        """Symbol strategy cache cleared after regime refresh."""
-        conn = _make_conn_with_symbols(["BTCUSDT"])
-        runner = self._make_runner(monkeypatch, conn=conn)
-        runner._symbol_strategy_cache["BTCUSDT"] = (runner._strategy, time.monotonic())
-        runner._last_btc_adx = 20.0
-        runner._last_regime_check = 0.0
-
-        ind_shifted = {"adx": 36.0, "atr_pct": 1.5, "above_sma200": False,
-                       "sma_aligned": False, "sma50_slope": 0.0, "adx_change": 0.0}
-        with patch("src.jobs.screener._compute_symbol_indicators", return_value=ind_shifted):
-            with patch("src.jobs.screener._assign_strategy", return_value="ema_crossover"):
-                with patch("src.jobs.screener._discover_strategies", return_value=[]):
-                    runner._regime_refresh_if_needed()
-
-        assert "BTCUSDT" not in runner._symbol_strategy_cache
-
-    def test_updates_last_btc_adx_after_refresh(self, monkeypatch):
-        """_last_btc_adx updated to current ADX after refresh."""
-        conn = _make_conn_with_symbols(["BTCUSDT"])
-        runner = self._make_runner(monkeypatch, conn=conn)
-        runner._last_btc_adx = 20.0
-        runner._last_regime_check = 0.0
-
-        ind = {"adx": 38.0, "atr_pct": 1.5, "above_sma200": False,
-               "sma_aligned": False, "sma50_slope": 0.0, "adx_change": 0.0}
-        with patch("src.jobs.screener._compute_symbol_indicators", return_value=ind):
-            with patch("src.jobs.screener._assign_strategy", return_value="supertrend"):
-                with patch("src.jobs.screener._discover_strategies", return_value=[]):
-                    runner._regime_refresh_if_needed()
-
-        assert runner._last_btc_adx == 38.0
 
     def test_no_crash_without_db(self, monkeypatch):
         """reload_if_changed() is safe when no DB connection."""
