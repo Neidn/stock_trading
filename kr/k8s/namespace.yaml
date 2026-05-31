@@ -3,4 +3,4 @@ kind: Namespace
 metadata:
   name: trading-stock-kr
   labels:
-    app.kubernetes.io/part-of: binance-futures-autotrading
+    app.kubernetes.io/part-of: kr-stock-autotrading

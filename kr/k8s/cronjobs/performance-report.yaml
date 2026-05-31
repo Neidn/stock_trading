@@ -6,7 +6,7 @@ metadata:
   namespace: trading-stock-kr
   labels:
     app: performance-report
-    app.kubernetes.io/part-of: binance-futures-autotrading
+    app.kubernetes.io/part-of: kr-stock-autotrading
 spec:
   schedule: "0 0 * * *"
   concurrencyPolicy: Forbid
@@ -20,8 +20,6 @@ spec:
             app: performance-report
         spec:
           restartPolicy: OnFailure
-          imagePullSecrets:
-            - name: dockerhub-credentials
           nodeSelector:
             storage: sqlite-node
           volumes:
@@ -30,7 +28,7 @@ spec:
                 claimName: sqlite-pvc
           containers:
             - name: report
-              image: neidn/binance-futures-trading:latest
+              image: neidn/stock-trading-kr:latest
               imagePullPolicy: Always
               command: ["python", "-m", "src.jobs.daily_report"]
               envFrom:

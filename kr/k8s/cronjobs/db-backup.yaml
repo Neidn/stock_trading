@@ -6,7 +6,7 @@ metadata:
   namespace: trading-stock-kr
   labels:
     app: db-backup
-    app.kubernetes.io/part-of: binance-futures-autotrading
+    app.kubernetes.io/part-of: kr-stock-autotrading
 spec:
   schedule: "0 2 * * *"
   concurrencyPolicy: Forbid
@@ -22,15 +22,13 @@ spec:
           restartPolicy: OnFailure
           nodeSelector:
             storage: sqlite-node
-          imagePullSecrets:
-            - name: dockerhub-credentials
           volumes:
             - name: trading-db
               persistentVolumeClaim:
                 claimName: sqlite-pvc
           containers:
             - name: db-backup
-              image: neidn/binance-futures-trading:latest
+              image: neidn/stock-trading-kr:latest
               imagePullPolicy: Always
               command: ["python", "-m", "src.jobs.db_backup"]
               envFrom:

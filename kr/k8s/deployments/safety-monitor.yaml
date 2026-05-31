@@ -5,7 +5,7 @@ metadata:
   namespace: trading-stock-kr
   labels:
     app: safety-monitor
-    app.kubernetes.io/part-of: binance-futures-autotrading
+    app.kubernetes.io/part-of: kr-stock-autotrading
 spec:
   replicas: 1
   selector:
@@ -21,8 +21,6 @@ spec:
       # Highest scheduling priority — survives node pressure
       priorityClassName: system-node-critical
 
-      imagePullSecrets:
-        - name: dockerhub-credentials
 
       # Schedule on the node that owns the SQLite PVC
       nodeSelector:
@@ -30,7 +28,7 @@ spec:
 
       containers:
         - name: safety-monitor
-          image: neidn/binance-futures-trading:latest
+          image: neidn/stock-trading-kr:latest
           imagePullPolicy: Always
           command: ["python", "-m", "src.safety.safety_monitor_main"]
           ports:
@@ -40,7 +38,7 @@ spec:
             - configMapRef:
                 name: trading-config
             - secretRef:
-                name: binance-api-secret
+                name: trading-secret
             - secretRef:
                 name: telegram-secret
 

@@ -4,7 +4,7 @@ metadata:
   name: sqlite-pvc
   namespace: trading-stock-kr
   labels:
-    app.kubernetes.io/part-of: binance-futures-autotrading
+    app.kubernetes.io/part-of: kr-stock-autotrading
 spec:
   accessModes:
     - ReadWriteOnce

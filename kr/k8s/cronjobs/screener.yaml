@@ -1,4 +1,4 @@
-# Volatility screener — every 4h (00:00, 04:00, 08:00, 12:00, 16:00, 20:00 UTC)
+# KRX pre-market screener — 08:00 KST (23:00 UTC) weekdays Mon-Fri
 apiVersion: batch/v1
 kind: CronJob
 metadata:
@@ -6,9 +6,9 @@ metadata:
   namespace: trading-stock-kr
   labels:
     app: screener
-    app.kubernetes.io/part-of: binance-futures-autotrading
+    app.kubernetes.io/part-of: kr-stock-autotrading
 spec:
-  schedule: "0 */4 * * *"
+  schedule: "0 23 * * 0-4"
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 3
   failedJobsHistoryLimit: 3
@@ -20,8 +20,6 @@ spec:
             app: screener
         spec:
           restartPolicy: OnFailure
-          imagePullSecrets:
-            - name: dockerhub-credentials
           nodeSelector:
             storage: sqlite-node
           volumes:
@@ -30,14 +28,14 @@ spec:
                 claimName: sqlite-pvc
           containers:
             - name: screener
-              image: neidn/binance-futures-trading:latest
+              image: neidn/stock-trading-kr:latest
               imagePullPolicy: Always
               command: ["python", "-m", "src.jobs.screener"]
               envFrom:
                 - configMapRef:
                     name: trading-config
                 - secretRef:
-                    name: binance-api-secret
+                    name: trading-secret
                 - secretRef:
                     name: telegram-secret
               env:
