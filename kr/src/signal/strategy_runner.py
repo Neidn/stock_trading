@@ -71,6 +71,8 @@ class StrategyRunner:
         # Per-symbol cache: {strategy_name: (BaseStrategy, loaded_at_monotonic)}
         self._symbol_strategy_cache: dict[str, tuple[BaseStrategy, float]] = {}
         self._CACHE_TTL = 300.0  # re-check DB every 5 min
+        # KRX has no BTC reference — always None (ADX scale = 1.0, no regime TP scaling)
+        self._last_btc_adx: float | None = None
 
     # ------------------------------------------------------------------
     # Public API
