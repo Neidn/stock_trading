@@ -32,7 +32,7 @@ CREATE TABLE IF NOT EXISTS settlements (
     settle_date     TEXT NOT NULL,  -- sell_date + 2 영업일
     amount_krw      TEXT NOT NULL,
     settled         INTEGER DEFAULT 0,
-    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    created_at      TEXT NOT NULL DEFAULT '1970-01-01',
     FOREIGN KEY (position_id) REFERENCES positions(position_id)
 );
 CREATE INDEX IF NOT EXISTS idx_settlements_settle ON settlements (settle_date, settled);

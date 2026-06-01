@@ -23,27 +23,37 @@ _MIGRATIONS_DIR = Path(__file__).parent / "migrations"
 def init_db(db_path: str) -> None:
     """Execute all migration SQL files against *db_path* in order.
 
-    Safe to call multiple times.  ``CREATE TABLE IF NOT EXISTS`` guards DDL in
-    001_init.sql.  ``ALTER TABLE ADD COLUMN`` (used in later migrations) raises
-    ``OperationalError: duplicate column name`` when the column already exists —
-    that error is silently ignored so restarts are idempotent.
+    Safe to call multiple times.  Each SQL statement is executed individually
+    so a partially-applied migration file does not cause later statements in
+    the same file to be skipped.  ``duplicate column name`` and ``already
+    exists`` errors are silently ignored per-statement.
 
     Args:
         db_path: Path to the SQLite database file.
     """
     import logging
+    import re
     from src.db.connection import get_connection  # avoid circular at module level
 
     logger = logging.getLogger(__name__)
     conn = get_connection(db_path)
     for sql_file in sorted(_MIGRATIONS_DIR.glob("*.sql")):
-        try:
-            conn.executescript(sql_file.read_text(encoding="utf-8"))
-        except sqlite3.OperationalError as exc:
-            if "duplicate column name" in str(exc):
-                logger.debug("Migration %s already applied (%s) — skipping", sql_file.name, exc)
-            else:
-                raise
+        sql = sql_file.read_text(encoding="utf-8")
+        # Strip line comments, split on semicolons
+        statements = [s.strip() for s in re.split(r";", sql) if s.strip()]
+        for stmt in statements:
+            # Skip comment-only blocks
+            clean = re.sub(r"--[^\n]*", "", stmt).strip()
+            if not clean:
+                continue
+            try:
+                conn.executescript(stmt + ";")
+            except sqlite3.OperationalError as exc:
+                msg = str(exc)
+                if "duplicate column name" in msg or "already exists" in msg:
+                    logger.debug("Statement already applied (%s) — skipping", exc)
+                else:
+                    raise
     conn.commit()
 
 
