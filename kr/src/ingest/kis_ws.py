@@ -202,8 +202,8 @@ class KISWSManager:
                     heartbeat=30,
                     receive_timeout=_SILENCE_TIMEOUT + 5,
                 ) as ws:
+                    connected_at = time.monotonic()
                     self._ws_connections[ticker] = ws
-                    delay = 1
                     logger.info("KIS WS %s connected", ticker)
 
                     if alerted and self._telegram:
@@ -227,6 +227,10 @@ class KISWSManager:
                     }))
 
                     await self._handle_messages(ws, ticker)
+
+                # Only reset backoff when connection was stable ≥10s
+                if time.monotonic() - connected_at >= 10:
+                    delay = 1
 
             except asyncio.CancelledError:
                 return
