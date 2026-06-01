@@ -1,29 +1,28 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: dashboard
+  name: dashboard-us
   namespace: trading-stock-kr
   labels:
-    app: dashboard
+    app: dashboard-us
     app.kubernetes.io/part-of: kr-stock-autotrading
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: dashboard
+      app: dashboard-us
   template:
     metadata:
       labels:
-        app: dashboard
+        app: dashboard-us
     spec:
       restartPolicy: Always
 
-      # Needs access to the SQLite PVC on the storage node
       nodeSelector:
         storage: sqlite-node
 
       containers:
-        - name: dashboard
+        - name: dashboard-us
           image: ghcr.io/neidn/stock-trading-kr:latest
           imagePullPolicy: Always
           command: ["python", "-m", "src.monitoring.dashboard"]
@@ -36,11 +35,11 @@ spec:
             - name: DASHBOARD_PORT
               value: "5000"
             - name: MARKET
-              value: "KR"
+              value: "US"
 
           envFrom:
             - configMapRef:
-                name: trading-config
+                name: trading-config-us
             - secretRef:
                 name: trading-secret
 

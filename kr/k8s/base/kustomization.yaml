@@ -1,0 +1,12 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Shared infrastructure — applied by both kr and us overlays.
+# Secrets are NOT here; apply trading-secret.yaml manually (not tracked in git).
+
+resources:
+  - ../namespace.yaml
+  - ../storage/sqlite-pvc.yaml
+  - ../services/services.yaml
+  - ../configmaps/trading-config.yaml
+  - ../configmaps/trading-config-us.yaml

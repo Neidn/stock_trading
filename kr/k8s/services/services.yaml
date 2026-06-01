@@ -50,3 +50,17 @@ spec:
       port: 80
       targetPort: 5000
   type: ClusterIP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dashboard-us-svc
+  namespace: trading-stock-kr
+spec:
+  selector:
+    app: dashboard-us
+  ports:
+    - name: http
+      port: 80
+      targetPort: 5000
+  type: ClusterIP

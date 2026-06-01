@@ -1,0 +1,26 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# KR trading system — shared infra + KR-specific workloads.
+# Apply: kubectl apply -k kr/k8s/overlays/kr
+
+resources:
+  - ../../base
+
+  # KR deployments
+  - ../../deployments/dashboard.yaml
+  - ../../deployments/data-ingest.yaml
+  - ../../deployments/signal-engine.yaml
+  - ../../deployments/order-executor.yaml
+  - ../../deployments/risk-manager.yaml
+
+  # KR ingressroute
+  - ../../ingressroutes/dashboard-ingressroute.yaml
+
+  # KR-only CronJobs
+  - ../../cronjobs/screener.yaml
+  - ../../cronjobs/screener-late.yaml
+  - ../../cronjobs/db-archiver.yaml
+  - ../../cronjobs/db-backup.yaml
+  - ../../cronjobs/performance-report.yaml
+  - ../../cronjobs/weekly-report.yaml

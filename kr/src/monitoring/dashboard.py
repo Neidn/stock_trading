@@ -1,4 +1,4 @@
-"""KRX trading dashboard — read-only Flask app for monitoring.
+"""Trading dashboard — read-only Flask app for KRX and US market monitoring.
 
 Routes:
     /               → Home: balance, open positions summary, today's PnL
@@ -12,13 +12,15 @@ Routes:
 
 Run standalone::
 
-    DB_PATH=/data/trading.db python -m src.monitoring.dashboard
+    DB_PATH=/data/trading.db MARKET=KR python -m src.monitoring.dashboard
 
 Environment variables:
     SQLITE_DB_PATH       Path to SQLite DB (default /data/trading.db)
     DASHBOARD_PORT       HTTP port (default 5000)
     TRADING_MODE         paper | live
-    FALLBACK_BALANCE_KRW Available KRW balance fallback
+    MARKET               KR (default) | US — switches currency and market-specific columns
+    FALLBACK_BALANCE_KRW Available KRW balance fallback (MARKET=KR)
+    FALLBACK_BALANCE_USD Available USD balance fallback (MARKET=US)
 """
 
 from __future__ import annotations
@@ -36,7 +38,9 @@ _log = logging.getLogger(__name__)
 app = Flask(__name__)
 
 _DB_PATH = os.environ.get("SQLITE_DB_PATH", "/data/trading.db")
-_KST = timezone(timedelta(hours=9))
+_KST    = timezone(timedelta(hours=9))
+_MARKET = os.environ.get("MARKET", "KR").upper()   # KR | US
+_IS_US  = _MARKET == "US"
 
 
 # ---------------------------------------------------------------------------
@@ -65,17 +69,27 @@ def _q1(sql: str, params: tuple = ()) -> sqlite3.Row | None:
         conn.close()
 
 
-def _krw(v) -> str:
+def _fmt(v) -> str:
+    """Format monetary value in market currency (KRW 원 or USD $)."""
     if v is None:
         return "—"
     f = float(v)
-    return f"{f:,.0f} 원"
+    return f"${f:,.2f}" if _IS_US else f"{f:,.0f} 원"
 
 
 def _pct(v) -> str:
     if v is None:
         return "—"
     return f"{float(v):+.2f}%"
+
+
+def _currency_label() -> str:
+    return "USD" if _IS_US else "KRW"
+
+
+def _pos_currency_filter() -> str:
+    """SQL fragment to filter positions by market currency."""
+    return "AND currency='USD'" if _IS_US else "AND (currency='KRW' OR currency IS NULL)"
 
 
 # ---------------------------------------------------------------------------
@@ -120,12 +134,17 @@ _STYLE = """
 def _page(title: str, body: str) -> str:
     now_kst = datetime.now(_KST).strftime("%Y-%m-%d %H:%M:%S KST")
     refresh = f'<p class="ts">Updated: {now_kst} &nbsp;<a href="" style="color:#4af">↺</a></p>'
+    market_badge = (
+        '<span class="badge badge-blue" style="font-size:0.75em;margin-left:8px">US</span>'
+        if _IS_US else
+        '<span class="badge badge-blue" style="font-size:0.75em;margin-left:8px">KR</span>'
+    )
     return (
         f"<!DOCTYPE html><html><head>"
-        f"<meta charset=utf-8><title>KRX Trading — {title}</title>"
+        f"<meta charset=utf-8><title>{_MARKET} Trading — {title}</title>"
         f"<meta name='viewport' content='width=device-width,initial-scale=1'>"
         f"{_STYLE}</head>"
-        f"<body>{_NAV}<h2>{title}</h2>{body}{refresh}</body></html>"
+        f"<body>{_NAV}<h2>{title}{market_badge}</h2>{body}{refresh}</body></html>"
     )
 
 
@@ -136,18 +155,22 @@ def _page(title: str, body: str) -> str:
 @app.route("/")
 def index():
     trading_mode = os.environ.get("TRADING_MODE", "paper").upper()
-    balance_krw = float(os.environ.get("FALLBACK_BALANCE_KRW", "0") or 0)
+    if _IS_US:
+        balance = float(os.environ.get("FALLBACK_BALANCE_USD", "0") or 0)
+    else:
+        balance = float(os.environ.get("FALLBACK_BALANCE_KRW", "0") or 0)
 
     today_kst = datetime.now(_KST).date().isoformat()
+    cf = _pos_currency_filter()
 
     today_stats = _q1(
-        """SELECT COUNT(*) AS n,
+        f"""SELECT COUNT(*) AS n,
                   SUM(CASE WHEN CAST(realized_pnl AS REAL) > 0 THEN 1 ELSE 0 END) AS wins,
                   SUM(CAST(realized_pnl AS REAL)) AS net
-           FROM positions WHERE status='closed' AND DATE(closed_at) = ?""",
+           FROM positions WHERE status='closed' AND DATE(closed_at) = ? {cf}""",
         (today_kst,),
     )
-    open_count = _q1("SELECT COUNT(*) AS c FROM positions WHERE status='open'")
+    open_count = _q1(f"SELECT COUNT(*) AS c FROM positions WHERE status='open' {cf}")
     recent_signals = _q(
         """SELECT symbol, signal_type, strategy_name, strength_score, blocked, created_at
            FROM signals ORDER BY created_at DESC LIMIT 8"""
@@ -159,8 +182,9 @@ def index():
     today_pnl = float(today_stats["net"] or 0) if today_stats else 0.0
     win_rate = wins / total_trades * 100 if total_trades else 0.0
 
-    mode_cls = "warn" if trading_mode == "PAPER" else "danger"
-    pnl_cls = "ok" if today_pnl >= 0 else "danger"
+    mode_cls  = "warn" if trading_mode == "PAPER" else "danger"
+    pnl_cls   = "ok" if today_pnl >= 0 else "danger"
+    bal_label = f"Available Balance ({_currency_label()})"
 
     sig_rows = ""
     for s in recent_signals:
@@ -184,10 +208,10 @@ def index():
     body = f"""
     <table style="width:auto;margin-bottom:20px">
       <tr><th>Mode</th><td><span class="badge badge-{mode_cls}">{trading_mode}</span></td></tr>
-      <tr><th>Available Balance</th><td><b>{_krw(balance_krw) if balance_krw else '—'}</b></td></tr>
+      <tr><th>{bal_label}</th><td><b>{_fmt(balance) if balance else '—'}</b></td></tr>
       <tr><th>Open Positions</th><td><b>{n_open}</b></td></tr>
       <tr><th>Today Closed Trades</th><td>{total_trades} &nbsp;({wins}W / {total_trades - wins}L) &nbsp;{win_rate:.1f}%</td></tr>
-      <tr><th>Today Realized PnL</th><td class="{pnl_cls}"><b>{_krw(today_pnl)}</b></td></tr>
+      <tr><th>Today Realized PnL</th><td class="{pnl_cls}"><b>{_fmt(today_pnl)}</b></td></tr>
     </table>
     <h3>Recent Signals</h3>
     {sig_table}
@@ -197,42 +221,47 @@ def index():
 
 @app.route("/positions")
 def positions():
+    cf = _pos_currency_filter()
     rows = _q(
-        """SELECT symbol, side, quantity, entry_price, stop_loss, take_profit_1, take_profit_2,
+        f"""SELECT symbol, side, quantity, entry_price, stop_loss, take_profit_1, take_profit_2,
                   realized_pnl, unrealized_pnl, strategy_name, trading_mode,
                   market, opened_at, t2_settle_date
-           FROM positions WHERE status='open' ORDER BY opened_at DESC"""
+           FROM positions WHERE status='open' {cf} ORDER BY opened_at DESC"""
     )
     if not rows:
         return _page("Open Positions", "<p class='muted'>No open positions.</p>")
 
+    t2_col = "" if _IS_US else "<th>T+2</th>"
+    market_col = "<th>Exchange</th>" if _IS_US else "<th>Market</th>"
     header = (
-        "<tr><th>Symbol</th><th>Market</th><th>Qty</th><th>Entry</th>"
-        "<th>SL</th><th>TP1</th><th>TP2</th>"
-        "<th>uPnL</th><th>Strategy</th><th>Mode</th><th>T+2</th><th>Opened (KST)</th></tr>"
+        f"<tr><th>Symbol</th>{market_col}<th>Qty</th><th>Entry</th>"
+        f"<th>SL</th><th>TP1</th><th>TP2</th>"
+        f"<th>uPnL</th><th>Strategy</th><th>Mode</th>{t2_col}<th>Opened</th></tr>"
     )
     trs = []
     for r in rows:
         entry = float(r["entry_price"] or 0)
-        sl = float(r["stop_loss"] or 0)
-        upnl = float(r["unrealized_pnl"] or 0)
+        sl    = float(r["stop_loss"] or 0)
+        upnl  = float(r["unrealized_pnl"] or 0)
         upnl_cls = "ok" if upnl >= 0 else "danger"
-        sl_pct = (entry - sl) / entry * 100 if entry and sl else 0
-        sl_str = f"{_krw(sl)} ({sl_pct:.1f}%)" if sl else "—"
+        sl_pct   = (entry - sl) / entry * 100 if entry and sl else 0
+        sl_str   = f"{_fmt(sl)} ({sl_pct:.1f}%)" if sl else "—"
         mode_cls = "warn" if (r["trading_mode"] or "paper") == "paper" else "ok"
+        market_val = r["market"] or ("US" if _IS_US else "KOSPI")
+        t2_td = "" if _IS_US else f"<td class='ts'>{r['t2_settle_date'] or '—'}</td>"
         trs.append(
             f"<tr>"
             f"<td><b>{r['symbol']}</b></td>"
-            f"<td>{r['market'] or 'KOSPI'}</td>"
+            f"<td>{market_val}</td>"
             f"<td>{r['quantity']}</td>"
-            f"<td>{_krw(entry)}</td>"
+            f"<td>{_fmt(entry)}</td>"
             f"<td class='warn'>{sl_str}</td>"
-            f"<td>{_krw(r['take_profit_1']) if r['take_profit_1'] else '—'}</td>"
-            f"<td>{_krw(r['take_profit_2']) if r['take_profit_2'] else '—'}</td>"
-            f"<td class='{upnl_cls}'>{_krw(upnl)}</td>"
+            f"<td>{_fmt(r['take_profit_1']) if r['take_profit_1'] else '—'}</td>"
+            f"<td>{_fmt(r['take_profit_2']) if r['take_profit_2'] else '—'}</td>"
+            f"<td class='{upnl_cls}'>{_fmt(upnl)}</td>"
             f"<td>{r['strategy_name'] or '—'}</td>"
             f"<td class='{mode_cls}'>{r['trading_mode'] or 'paper'}</td>"
-            f"<td class='ts'>{r['t2_settle_date'] or '—'}</td>"
+            f"{t2_td}"
             f"<td class='ts'>{(r['opened_at'] or '')[:16]}</td>"
             f"</tr>"
         )
@@ -373,7 +402,7 @@ def performance():
     <table style="width:auto">
       <tr><th>Trades</th><td>{week_t} ({week_w}W / {week_t - week_w}L)</td></tr>
       <tr><th>Win Rate</th><td>{week_wr:.1f}%</td></tr>
-      <tr><th>Net PnL</th><td class="{net_cls}"><b>{_krw(week_net)}</b></td></tr>
+      <tr><th>Net PnL</th><td class="{net_cls}"><b>{_fmt(week_net)}</b></td></tr>
     </table>
     <h3>Daily History (last 30 days)</h3>
     """
@@ -393,7 +422,7 @@ def performance():
             cls = "ok" if net >= 0 else "danger"
             trs.append(
                 f"<tr><td>{r['d']}</td><td>{t} ({w}W/{t-w}L)</td>"
-                f"<td>{wr:.1f}%</td><td class='{cls}'>{_krw(net)}</td>"
+                f"<td>{wr:.1f}%</td><td class='{cls}'>{_fmt(net)}</td>"
                 f"<td>{pf_str}</td></tr>"
             )
         body += f"<table>{header}{''.join(trs)}</table>"
@@ -422,7 +451,7 @@ def performance():
             s_trs.append(
                 f"<tr><td>{r['strategy_name'] or 'unknown'}</td>"
                 f"<td>{t}</td><td>{wr:.1f}%</td>"
-                f"<td class='{net_cls}'>{_krw(net)}</td>"
+                f"<td class='{net_cls}'>{_fmt(net)}</td>"
                 f"<td class='{pf_cls}'>{pf_str}</td>"
                 f"<td>{kelly}</td></tr>"
             )
@@ -435,40 +464,68 @@ def performance():
 
 @app.route("/screener")
 def screener():
-    rows = _q(
-        """SELECT s.symbol, s.is_active, s.market, s.sector, s.market_cap, s.strategy, s.added_at,
-                  (SELECT COUNT(*) FROM positions p WHERE p.symbol=s.symbol AND p.status='open') AS open_pos,
-                  (SELECT COUNT(*) FROM klines k WHERE k.symbol=s.symbol AND k.interval_type='1d') AS candles
-           FROM symbols s
-           ORDER BY s.is_active DESC, s.symbol ASC"""
-    )
+    if _IS_US:
+        rows = _q(
+            """SELECT s.symbol, s.is_active, s.excd, s.strategy, s.added_at,
+                      (SELECT COUNT(*) FROM positions p WHERE p.symbol=s.symbol AND p.status='open') AS open_pos,
+                      (SELECT COUNT(*) FROM klines k WHERE k.symbol=s.symbol AND k.interval_type='1d') AS candles
+               FROM symbols s WHERE s.excd IS NOT NULL
+               ORDER BY s.is_active DESC, s.symbol ASC"""
+        )
+    else:
+        rows = _q(
+            """SELECT s.symbol, s.is_active, s.market, s.sector, s.market_cap, s.strategy, s.added_at,
+                      (SELECT COUNT(*) FROM positions p WHERE p.symbol=s.symbol AND p.status='open') AS open_pos,
+                      (SELECT COUNT(*) FROM klines k WHERE k.symbol=s.symbol AND k.interval_type='1d') AS candles
+               FROM symbols s WHERE s.excd IS NULL OR s.excd = ''
+               ORDER BY s.is_active DESC, s.symbol ASC"""
+        )
     if not rows:
         return _page("Screener", "<p class='muted'>No symbols in DB.</p>")
 
     active = sum(1 for r in rows if r["is_active"])
-    header = (
-        "<tr><th>Symbol</th><th>Market</th><th>Sector</th>"
-        "<th>시가총액</th><th>Strategy</th><th>Open</th>"
-        "<th>Candles(1d)</th><th>Active</th><th>Added</th></tr>"
-    )
+    if _IS_US:
+        header = (
+            "<tr><th>Symbol</th><th>Exchange</th><th>Strategy</th>"
+            "<th>Open</th><th>Candles(1d)</th><th>Active</th><th>Added</th></tr>"
+        )
+    else:
+        header = (
+            "<tr><th>Symbol</th><th>Market</th><th>Sector</th>"
+            "<th>시가총액</th><th>Strategy</th><th>Open</th>"
+            "<th>Candles(1d)</th><th>Active</th><th>Added</th></tr>"
+        )
     trs = []
     for r in rows:
         active_cls = "ok" if r["is_active"] else "muted"
         active_txt = "YES" if r["is_active"] else "no"
-        open_cls = "warn" if r["open_pos"] else ""
-        trs.append(
-            f"<tr>"
-            f"<td class='{active_cls}'><b>{r['symbol']}</b></td>"
-            f"<td>{r['market'] or '—'}</td>"
-            f"<td>{r['sector'] or '—'}</td>"
-            f"<td>{r['market_cap'] or '—'}</td>"
-            f"<td>{r['strategy'] or '—'}</td>"
-            f"<td class='{open_cls}'>{r['open_pos'] or 0}</td>"
-            f"<td>{r['candles'] or 0}</td>"
-            f"<td class='{active_cls}'>{active_txt}</td>"
-            f"<td class='ts'>{(r['added_at'] or '')[:10]}</td>"
-            f"</tr>"
-        )
+        open_cls   = "warn" if r["open_pos"] else ""
+        if _IS_US:
+            trs.append(
+                f"<tr>"
+                f"<td class='{active_cls}'><b>{r['symbol']}</b></td>"
+                f"<td>{r['excd'] or '—'}</td>"
+                f"<td>{r['strategy'] or '—'}</td>"
+                f"<td class='{open_cls}'>{r['open_pos'] or 0}</td>"
+                f"<td>{r['candles'] or 0}</td>"
+                f"<td class='{active_cls}'>{active_txt}</td>"
+                f"<td class='ts'>{(r['added_at'] or '')[:10]}</td>"
+                f"</tr>"
+            )
+        else:
+            trs.append(
+                f"<tr>"
+                f"<td class='{active_cls}'><b>{r['symbol']}</b></td>"
+                f"<td>{r['market'] or '—'}</td>"
+                f"<td>{r['sector'] or '—'}</td>"
+                f"<td>{r['market_cap'] or '—'}</td>"
+                f"<td>{r['strategy'] or '—'}</td>"
+                f"<td class='{open_cls}'>{r['open_pos'] or 0}</td>"
+                f"<td>{r['candles'] or 0}</td>"
+                f"<td class='{active_cls}'>{active_txt}</td>"
+                f"<td class='ts'>{(r['added_at'] or '')[:10]}</td>"
+                f"</tr>"
+            )
     body = (
         f"<p><span class='ok'>{active} active</span> / {len(rows)} total symbols</p>"
         f"<table>{header}{''.join(trs)}</table>"
