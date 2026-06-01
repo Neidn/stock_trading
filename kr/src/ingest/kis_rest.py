@@ -1,28 +1,45 @@
 """KIS (한국투자증권) Open API async REST client.
 
-Drop-in replacement for BinanceRestClient — same async context-manager
-lifecycle, same method signatures where possible.
+Supports both KRX domestic stocks and US overseas stocks (NYSE/NASDAQ/AMEX)
+via the same account and auth token.
 
-Endpoints used:
-  POST /oauth2/tokenP                                  — access token
-  GET  /uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice  — OHLCV
-  GET  /uapi/domestic-stock/v1/quotations/inquire-price                 — current price
-  GET  /uapi/domestic-stock/v1/trading/inquire-balance                  — holdings + cash
-  POST /uapi/domestic-stock/v1/trading/order-cash                       — buy / sell
+KRX endpoints (domestic-stock/v1):
+  POST /oauth2/tokenP                                                     — access token
+  GET  /uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice    — OHLCV
+  GET  /uapi/domestic-stock/v1/quotations/inquire-price                   — current price
+  GET  /uapi/domestic-stock/v1/trading/inquire-balance                    — KRW balance
+  POST /uapi/domestic-stock/v1/trading/order-cash                         — KRX buy / sell
+
+US endpoints (overseas-stock/v1):
+  GET  /uapi/overseas-stock/v1/quotations/dailychartprice                 — US OHLCV
+  GET  /uapi/overseas-stock/v1/quotations/price                           — US current price
+  GET  /uapi/overseas-stock/v1/trading/inquire-balance                    — USD balance
+  POST /uapi/overseas-stock/v1/trading/order                              — US buy / sell
+  POST /uapi/overseas-stock/v1/trading/order-rvsecncl                     — US cancel
+  GET  /uapi/overseas-stock/v1/trading/inquire-nccs                       — US unfilled orders
 
 tr_id mapping (paper vs live):
-  Paper buy  : VTTC0802U   Live buy  : TTTC0802U
-  Paper sell : VTTC0801U   Live sell : TTTC0801U
-  Paper bal  : VTTC8434R   Live bal  : TTTC8434R
+  KRX buy    : VTTC0802U / TTTC0802U    KRX sell   : VTTC0801U / TTTC0801U
+  KRX bal    : VTTC8434R / TTTC8434R    KRX cancel : VTTC0803U / TTTC0803U
+  US  buy    : VTTT1002U / TTTT1002U    US  sell   : VTTT1006U / TTTT1006U
+  US  bal    : VTTS3012R / TTTS3012R    US  cancel : VTTT1004U / TTTT1004U
+  US  nccs   : VTTS3035R / TTTS3035R
+
+US exchange codes:
+  Data (EXCD 3-char): NAS, NYS, AMS
+  Order (OVRS_EXCG_CD 4-char): NASD, NYSE, AMEX
 
 Usage::
 
     async with KISRestClient() as client:
-        ohlcv  = await client.fetch_klines("005930", "D", limit=200)
+        # KRX
+        ohlcv  = await client.fetch_klines("005930", limit=200)
         bal    = await client.fetch_account_balance()
-        pos    = await client.fetch_positions()
-        price  = await client.fetch_current_price("005930")
         result = await client.place_buy_order("005930", qty=10)
+        # US
+        ohlcv  = await client.fetch_klines_us("AAPL", excd="NAS", limit=200)
+        bal    = await client.fetch_account_balance_us()
+        result = await client.place_buy_order_us("AAPL", excd="NAS", qty=5, price=185.50)
 """
 
 from __future__ import annotations
@@ -33,6 +50,7 @@ import time
 from collections import deque
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import aiohttp
 
@@ -43,6 +61,13 @@ logger = get_logger("kis_rest")
 
 _PAPER_BASE = "https://openapivts.koreainvestment.com:29443"
 _LIVE_BASE = "https://openapi.koreainvestment.com:9443"
+
+# US exchange code mapping: data query (3-char) → order API (4-char)
+_US_EXCD_TO_ORDER: dict[str, str] = {
+    "NAS": "NASD",
+    "NYS": "NYSE",
+    "AMS": "AMEX",
+}
 
 _TOKEN_BUFFER_SEC = 300   # refresh 5 min before expiry
 _RATE_MAX = 18            # requests per second (KIS limit is 20; stay under)
@@ -633,6 +658,344 @@ class KISRestClient:
                 "filled_qty": int(item.get("tot_ccld_qty", "0") or "0"),
                 "ord_dvsn":  item.get("ord_dvsn", "00"),
                 "price":     item.get("ord_unpr", "0"),
+            })
+        return result
+
+    # ------------------------------------------------------------------
+    # US overseas stock — market data
+    # ------------------------------------------------------------------
+
+    @with_retry(max_retries=3, delay=1.0)
+    async def fetch_klines_us(
+        self,
+        symbol: str,
+        excd: str = "NAS",
+        limit: int = 100,
+    ) -> list[dict]:
+        """Fetch OHLCV daily candles for a US stock.
+
+        Args:
+            symbol: US ticker, e.g. ``'AAPL'``.
+            excd: Exchange code — ``'NAS'`` (NASDAQ), ``'NYS'`` (NYSE), ``'AMS'`` (AMEX).
+            limit: Number of candles to return (max 100 per KIS page).
+
+        Returns:
+            List of dicts with keys: symbol, interval_type, open_time, open,
+            high, low, close, volume, close_time.  Oldest first.
+        """
+        from datetime import timezone as _tz
+        ET = ZoneInfo("America/New_York")
+
+        end_date = datetime.now(ET).strftime("%Y%m%d")
+        start_date = (datetime.now(ET) - timedelta(days=limit * 2)).strftime("%Y%m%d")
+
+        data = await self._get(
+            "/uapi/overseas-stock/v1/quotations/dailychartprice",
+            tr_id="HHDFS76240000",
+            params={
+                "AUTH":  "",
+                "EXCD":  excd,
+                "SYMB":  symbol,
+                "GUBN":  "0",       # 0=일, 1=주, 2=월
+                "BYMD":  end_date,
+                "MODP":  "0",       # 0=수정가 미적용
+            },
+        )
+
+        rows = data.get("output2", []) or []
+        result = []
+        for row in rows:
+            dt_str = row.get("stck_bsop_date", "")
+            if not dt_str:
+                continue
+            try:
+                # US market: open 09:30 ET, close 16:00 ET
+                dt_open = datetime.strptime(dt_str, "%Y%m%d").replace(
+                    hour=9, minute=30, tzinfo=ET
+                )
+                dt_close = dt_open.replace(hour=16, minute=0)
+                open_ts = int(dt_open.timestamp() * 1000)
+                close_ts = int(dt_close.timestamp() * 1000)
+            except ValueError:
+                continue
+            result.append({
+                "symbol":        symbol,
+                "interval_type": "1d",
+                "open_time":     str(open_ts),
+                "open":          row.get("ovrs_nmix_oprc", "0"),
+                "high":          row.get("ovrs_nmix_hgpr", "0"),
+                "low":           row.get("ovrs_nmix_lwpr", "0"),
+                "close":         row.get("ovrs_nmix_prpr", "0"),
+                "volume":        row.get("acml_vol", "0"),
+                "close_time":    str(close_ts),
+            })
+
+        result.sort(key=lambda r: r["open_time"])
+        return result[-limit:]
+
+    @with_retry(max_retries=3, delay=1.0)
+    async def fetch_current_price_us(self, symbol: str, excd: str = "NAS") -> dict:
+        """Fetch current price snapshot for a US stock.
+
+        Returns:
+            Dict with keys: symbol, price, open, high, low, volume,
+            change_pct, excd.
+        """
+        data = await self._get(
+            "/uapi/overseas-stock/v1/quotations/price",
+            tr_id="HHDFS00000300",
+            params={
+                "AUTH": "",
+                "EXCD": excd,
+                "SYMB": symbol,
+            },
+        )
+        out = data.get("output", {})
+        return {
+            "symbol":     symbol,
+            "excd":       excd,
+            "price":      out.get("last", "0"),     # 현재가 (USD)
+            "open":       out.get("open", "0"),
+            "high":       out.get("high", "0"),
+            "low":        out.get("low", "0"),
+            "volume":     out.get("tvol", "0"),
+            "change_pct": out.get("rate", "0"),     # 등락율
+        }
+
+    # ------------------------------------------------------------------
+    # US overseas stock — account
+    # ------------------------------------------------------------------
+
+    @with_retry(max_retries=3, delay=1.0)
+    async def fetch_account_balance_us(self) -> dict:
+        """Fetch USD account balance for overseas stocks.
+
+        Returns:
+            Dict with keys: totalWalletBalance, availableBalance (USD strings).
+
+        Note:
+            KIS paper (VTS) server does NOT support this endpoint.
+            Use ``FALLBACK_BALANCE_USD`` env var in paper mode.
+        """
+        tr_id = "VTTS3012R" if self._paper else "TTTS3012R"
+        data = await self._get_order(
+            "/uapi/overseas-stock/v1/trading/inquire-balance",
+            tr_id=tr_id,
+            params={
+                "CANO":          self._acct_no,
+                "ACNT_PRDT_CD":  self._acct_prod,
+                "OVRS_EXCG_CD":  "NASD",   # query all; KIS returns total across exchanges
+                "TR_CRCY_CD":    "USD",
+                "CTX_AREA_FK200": "",
+                "CTX_AREA_NK200": "",
+            },
+        )
+        s = (data.get("output2") or [{}])[0]
+        return {
+            "totalWalletBalance": s.get("tot_evlu_pfls_amt", "0"),  # 총 평가손익
+            "availableBalance":   s.get("frcr_dncl_amt_2", "0"),   # 외화예수금 (available USD)
+        }
+
+    @with_retry(max_retries=3, delay=1.0)
+    async def fetch_positions_us(self, excd: str = "") -> list[dict]:
+        """Fetch current US stock holdings.
+
+        Args:
+            excd: Filter by exchange (``'NASD'``, ``'NYSE'``, etc.), or ``''`` for all.
+
+        Returns:
+            List of dicts: symbol, excd, positionAmt, entryPrice, unrealizedProfit.
+        """
+        tr_id = "VTTS3012R" if self._paper else "TTTS3012R"
+        data = await self._get_order(
+            "/uapi/overseas-stock/v1/trading/inquire-balance",
+            tr_id=tr_id,
+            params={
+                "CANO":          self._acct_no,
+                "ACNT_PRDT_CD":  self._acct_prod,
+                "OVRS_EXCG_CD":  excd or "NASD",
+                "TR_CRCY_CD":    "USD",
+                "CTX_AREA_FK200": "",
+                "CTX_AREA_NK200": "",
+            },
+        )
+        holdings = []
+        for item in data.get("output1", []):
+            qty = int(float(item.get("ovrs_cblc_qty", "0") or "0"))
+            if qty == 0:
+                continue
+            holdings.append({
+                "symbol":           item.get("ovrs_pdno", ""),
+                "name":             item.get("ovrs_item_name", ""),
+                "excd":             item.get("ovrs_excg_cd", ""),
+                "positionAmt":      str(qty),
+                "entryPrice":       item.get("pchs_avg_pric", "0"),
+                "unrealizedProfit": item.get("frcr_evlu_pfls_amt", "0"),
+            })
+        return holdings
+
+    # ------------------------------------------------------------------
+    # US overseas stock — order placement
+    # ------------------------------------------------------------------
+
+    async def place_buy_order_us(
+        self,
+        symbol: str,
+        excd: str,
+        qty: int,
+        price: float | None = None,
+    ) -> dict:
+        """Submit a US stock buy order.
+
+        Args:
+            symbol: US ticker, e.g. ``'AAPL'``.
+            excd: Exchange code (3-char): ``'NAS'``, ``'NYS'``, ``'AMS'``.
+            qty: Share count (integer; KIS does not support fractional shares).
+            price: Limit price (USD, e.g. ``185.50``). None → market order.
+
+        Returns:
+            KIS order response output dict.
+        """
+        tr_id = "VTTT1002U" if self._paper else "TTTT1002U"
+        ovrs_excg_cd = _US_EXCD_TO_ORDER.get(excd, excd)
+        if price is None:
+            ord_dvsn, ord_unpr = "00", "0"   # 시장가 on US = ORD_DVSN 00 with price 0
+        else:
+            ord_dvsn, ord_unpr = "00", f"{price:.2f}"
+
+        data = await self._post(
+            "/uapi/overseas-stock/v1/trading/order",
+            tr_id=tr_id,
+            body={
+                "CANO":             self._acct_no,
+                "ACNT_PRDT_CD":     self._acct_prod,
+                "OVRS_EXCG_CD":     ovrs_excg_cd,
+                "PDNO":             symbol,
+                "ORD_DVSN":         ord_dvsn,
+                "ORD_QTY":          str(qty),
+                "OVRS_ORD_UNPR":    ord_unpr,
+                "ORD_SVR_DVSN_CD":  "0",
+            },
+        )
+        logger.info(
+            "kis.us.buy.placed symbol=%s excd=%s qty=%d price=%s mode=%s",
+            symbol, excd, qty, ord_unpr, "paper" if self._paper else "live",
+        )
+        return data.get("output", {})
+
+    async def place_sell_order_us(
+        self,
+        symbol: str,
+        excd: str,
+        qty: int,
+        price: float | None = None,
+    ) -> dict:
+        """Submit a US stock sell order.
+
+        Args:
+            symbol: US ticker, e.g. ``'AAPL'``.
+            excd: Exchange code (3-char): ``'NAS'``, ``'NYS'``, ``'AMS'``.
+            qty: Share count.
+            price: Limit price (USD). None → market order.
+
+        Returns:
+            KIS order response output dict.
+        """
+        tr_id = "VTTT1006U" if self._paper else "TTTT1006U"
+        ovrs_excg_cd = _US_EXCD_TO_ORDER.get(excd, excd)
+        if price is None:
+            ord_dvsn, ord_unpr = "00", "0"
+        else:
+            ord_dvsn, ord_unpr = "00", f"{price:.2f}"
+
+        data = await self._post(
+            "/uapi/overseas-stock/v1/trading/order",
+            tr_id=tr_id,
+            body={
+                "CANO":             self._acct_no,
+                "ACNT_PRDT_CD":     self._acct_prod,
+                "OVRS_EXCG_CD":     ovrs_excg_cd,
+                "PDNO":             symbol,
+                "ORD_DVSN":         ord_dvsn,
+                "ORD_QTY":          str(qty),
+                "OVRS_ORD_UNPR":    ord_unpr,
+                "ORD_SVR_DVSN_CD":  "0",
+            },
+        )
+        logger.info(
+            "kis.us.sell.placed symbol=%s excd=%s qty=%d price=%s mode=%s",
+            symbol, excd, qty, ord_unpr, "paper" if self._paper else "live",
+        )
+        return data.get("output", {})
+
+    async def cancel_order_us(
+        self,
+        order_no: str,
+        excd: str,
+        qty: int,
+        ord_dvsn: str = "00",
+    ) -> dict:
+        """Cancel a pending US stock order.
+
+        Args:
+            order_no: 주문번호 (odno from place order response).
+            excd: Exchange code (3-char).
+            qty: Quantity to cancel.
+            ord_dvsn: Order type code from original order.
+        """
+        tr_id = "VTTT1004U" if self._paper else "TTTT1004U"
+        ovrs_excg_cd = _US_EXCD_TO_ORDER.get(excd, excd)
+        data = await self._post(
+            "/uapi/overseas-stock/v1/trading/order-rvsecncl",
+            tr_id=tr_id,
+            body={
+                "CANO":              self._acct_no,
+                "ACNT_PRDT_CD":      self._acct_prod,
+                "OVRS_EXCG_CD":      ovrs_excg_cd,
+                "ORGN_ODNO":         order_no,
+                "ORD_DVSN_CD":       ord_dvsn,
+                "RVSE_CNCL_DVSN_CD": "02",   # 취소
+                "ORD_QTY":           str(qty),
+                "OVRS_ORD_UNPR":     "0",
+                "ORD_SVR_DVSN_CD":   "0",
+            },
+        )
+        logger.info("kis.us.cancel.placed order_no=%s excd=%s", order_no, excd)
+        return data.get("output", {})
+
+    async def fetch_unfilled_orders_us(self, excd: str = "") -> list[dict]:
+        """Fetch all pending (unfilled/cancellable) US orders.
+
+        Args:
+            excd: Filter by exchange (4-char: ``'NASD'``, ``'NYSE'``, ``'AMEX'``),
+                  or ``''`` to query all.
+
+        Returns:
+            List of dicts: order_no, excd, symbol, qty, filled_qty, price, ord_dvsn.
+        """
+        tr_id = "VTTS3035R" if self._paper else "TTTS3035R"
+        data = await self._get_order(
+            "/uapi/overseas-stock/v1/trading/inquire-nccs",
+            tr_id=tr_id,
+            params={
+                "CANO":           self._acct_no,
+                "ACNT_PRDT_CD":   self._acct_prod,
+                "OVRS_EXCG_CD":   excd or "NASD",
+                "SORT_SQN":       "DS",
+                "CTX_AREA_FK200": "",
+                "CTX_AREA_NK200": "",
+            },
+        )
+        result = []
+        for item in data.get("output", []):
+            result.append({
+                "order_no":   item.get("odno", ""),
+                "excd":       item.get("ovrs_excg_cd", ""),
+                "symbol":     item.get("pdno", ""),
+                "qty":        int(float(item.get("ft_ord_qty", "0") or "0")),
+                "filled_qty": int(float(item.get("ft_ccld_qty", "0") or "0")),
+                "price":      item.get("ft_ord_unpr3", "0"),
+                "ord_dvsn":   item.get("ord_dvsn_cd", "00"),
             })
         return result
 

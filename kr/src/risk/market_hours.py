@@ -1,19 +1,16 @@
-"""KRX market-hours guard.
+"""Market-hours guards for KRX and US markets.
 
 KRX trades 09:00–15:30 KST, weekdays only (Korean public holidays excluded).
-All trading actions MUST be gated through :func:`is_market_open` before
-sending any order or signal.
+US  trades 09:30–16:00 ET,  weekdays only (US federal holidays excluded).
 
 Usage::
 
-    from src.risk.market_hours import is_market_open, is_closing_soon
+    from src.risk.market_hours import is_market_open, is_us_market_open
 
-    if not is_market_open():
-        logger.info("Market closed — skipping.")
+    if not is_market_open():        # KRX
         return
-
-    if is_closing_soon():
-        logger.info("15 min to close — force-exit mode.")
+    if not is_us_market_open():     # NYSE / NASDAQ
+        return
 """
 
 from __future__ import annotations
@@ -22,6 +19,7 @@ import datetime
 from zoneinfo import ZoneInfo
 
 KST = ZoneInfo("Asia/Seoul")
+ET  = ZoneInfo("America/New_York")
 
 _OPEN_H, _OPEN_M = 9, 0
 _CLOSE_H, _CLOSE_M = 15, 30
@@ -134,9 +132,112 @@ def seconds_until_open() -> float:
 
 
 def minutes_until_close() -> float:
-    """Return minutes remaining until market close. Negative if closed."""
+    """Return minutes remaining until KRX close. Negative if closed."""
     now = _now_kst()
     if not is_trading_day(now.date()):
         return -1.0
     close_dt = now.replace(hour=_CLOSE_H, minute=_CLOSE_M, second=0, microsecond=0)
+    return (close_dt - now).total_seconds() / 60
+
+
+# ---------------------------------------------------------------------------
+# US market (NYSE / NASDAQ)  — 09:30–16:00 America/New_York
+# ---------------------------------------------------------------------------
+
+_US_OPEN_H,  _US_OPEN_M  = 9,  30
+_US_CLOSE_H, _US_CLOSE_M = 16, 0
+
+# US federal holidays 2025–2027 that close NYSE/NASDAQ
+_US_HOLIDAYS: frozenset[datetime.date] = frozenset({
+    # 2025
+    datetime.date(2025, 1, 1),   # New Year's Day
+    datetime.date(2025, 1, 20),  # MLK Day
+    datetime.date(2025, 2, 17),  # Presidents' Day
+    datetime.date(2025, 4, 18),  # Good Friday
+    datetime.date(2025, 5, 26),  # Memorial Day
+    datetime.date(2025, 6, 19),  # Juneteenth
+    datetime.date(2025, 7, 4),   # Independence Day
+    datetime.date(2025, 9, 1),   # Labor Day
+    datetime.date(2025, 11, 27), # Thanksgiving
+    datetime.date(2025, 12, 25), # Christmas
+    # 2026
+    datetime.date(2026, 1, 1),   # New Year's Day
+    datetime.date(2026, 1, 19),  # MLK Day
+    datetime.date(2026, 2, 16),  # Presidents' Day
+    datetime.date(2026, 4, 3),   # Good Friday
+    datetime.date(2026, 5, 25),  # Memorial Day
+    datetime.date(2026, 6, 19),  # Juneteenth
+    datetime.date(2026, 7, 3),   # Independence Day (observed Fri)
+    datetime.date(2026, 9, 7),   # Labor Day
+    datetime.date(2026, 11, 26), # Thanksgiving
+    datetime.date(2026, 12, 25), # Christmas
+    # 2027
+    datetime.date(2027, 1, 1),   # New Year's Day
+    datetime.date(2027, 1, 18),  # MLK Day
+    datetime.date(2027, 2, 15),  # Presidents' Day
+    datetime.date(2027, 3, 26),  # Good Friday
+    datetime.date(2027, 5, 31),  # Memorial Day
+    datetime.date(2027, 6, 18),  # Juneteenth (observed Fri)
+    datetime.date(2027, 7, 5),   # Independence Day (observed Mon)
+    datetime.date(2027, 9, 6),   # Labor Day
+    datetime.date(2027, 11, 25), # Thanksgiving
+    datetime.date(2027, 12, 24), # Christmas (observed Fri)
+})
+
+
+def _now_et() -> datetime.datetime:
+    return datetime.datetime.now(tz=ET)
+
+
+def is_us_trading_day(date: datetime.date | None = None) -> bool:
+    """Return True if *date* is a NYSE/NASDAQ trading day."""
+    d = date or _now_et().date()
+    return d.weekday() < 5 and d not in _US_HOLIDAYS
+
+
+def is_us_market_open(*, buffer_open_sec: int = 0) -> bool:
+    """Return True if US market (NYSE/NASDAQ) is currently open.
+
+    Args:
+        buffer_open_sec: Skip the first N seconds after 09:30 open.
+    """
+    now = _now_et()
+    if not is_us_trading_day(now.date()):
+        return False
+
+    open_dt  = now.replace(hour=_US_OPEN_H,  minute=_US_OPEN_M,  second=0, microsecond=0)
+    close_dt = now.replace(hour=_US_CLOSE_H, minute=_US_CLOSE_M, second=0, microsecond=0)
+    open_dt += datetime.timedelta(seconds=buffer_open_sec)
+    return open_dt <= now < close_dt
+
+
+def is_us_closing_soon(buffer_min: int = 10) -> bool:
+    """Return True if US market closes within *buffer_min* minutes."""
+    now = _now_et()
+    if not is_us_trading_day(now.date()):
+        return False
+    close_dt = now.replace(hour=_US_CLOSE_H, minute=_US_CLOSE_M, second=0, microsecond=0)
+    return datetime.timedelta(0) <= (close_dt - now) <= datetime.timedelta(minutes=buffer_min)
+
+
+def seconds_until_us_open() -> float:
+    """Return seconds until next US market open. Returns 0 if open now."""
+    if is_us_market_open():
+        return 0.0
+
+    now = _now_et()
+    candidate = now.replace(hour=_US_OPEN_H, minute=_US_OPEN_M, second=0, microsecond=0)
+    if candidate <= now:
+        candidate += datetime.timedelta(days=1)
+    while not is_us_trading_day(candidate.date()):
+        candidate += datetime.timedelta(days=1)
+    return (candidate - now).total_seconds()
+
+
+def minutes_until_us_close() -> float:
+    """Return minutes remaining until US market close. Negative if closed."""
+    now = _now_et()
+    if not is_us_trading_day(now.date()):
+        return -1.0
+    close_dt = now.replace(hour=_US_CLOSE_H, minute=_US_CLOSE_M, second=0, microsecond=0)
     return (close_dt - now).total_seconds() / 60
