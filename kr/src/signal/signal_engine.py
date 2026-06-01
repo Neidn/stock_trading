@@ -35,7 +35,7 @@ _TIMEFRAME_INTERVALS: dict[str, int] = {
     "30m": 1800,
     "1h": 3600,
     "4h": 14400,
-    "1d": 86400,
+    "1d": 3600,   # daily candles: check hourly so signals fire during market hours
 }
 
 _DEFAULT_CANDLE_LIMIT = 250  # macd_sma200_chartart needs 219; 250 gives headroom
