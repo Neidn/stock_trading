@@ -1,0 +1,41 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Apply everything: kubectl apply -k k8s/
+# Secrets are applied manually (not tracked in git):
+#   kubectl apply -f k8s/secrets/trading-secret.yaml
+#   kubectl apply -f k8s/secrets/telegram-secret.yaml
+
+resources:
+  # Infra
+  - namespace.yaml
+  - storage/sqlite-pvc.yaml
+  - services/services.yaml
+
+  # Config
+  - configmaps/trading-config.yaml
+  - configmaps/trading-config-us.yaml
+
+  # KR deployments
+  - deployments/dashboard.yaml
+  - deployments/data-ingest.yaml
+  - deployments/signal-engine.yaml
+  - deployments/order-executor.yaml
+  - deployments/risk-manager.yaml
+
+  # US deployments
+  - deployments/dashboard-us.yaml
+  - deployments/data-ingest-us.yaml
+  - deployments/signal-engine-us.yaml
+
+  # Ingress
+  - ingressroutes/dashboard-ingressroute.yaml
+  - ingressroutes/dashboard-us-ingressroute.yaml
+
+  # CronJobs
+  - cronjobs/screener.yaml
+  - cronjobs/screener-late.yaml
+  - cronjobs/db-archiver.yaml
+  - cronjobs/db-backup.yaml
+  - cronjobs/performance-report.yaml
+  - cronjobs/weekly-report.yaml
