@@ -47,7 +47,7 @@ class RsiMacdStrategy(BaseStrategy):
         return self.params.get("slow_period", 26) * 3
 
     def get_timeframe(self) -> str:
-        return "1h"
+        return "1d"
 
     def _validate_params(self) -> None:
         """Validate parameter relationships.

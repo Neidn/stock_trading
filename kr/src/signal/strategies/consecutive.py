@@ -63,7 +63,7 @@ class ConsecutiveStrategy(BaseStrategy):
         return max(n_days + 1, sma_period) + 20
 
     def get_timeframe(self) -> str:
-        return "D"
+        return "1d"
 
     def generate_signal(self, df, symbol: str) -> SignalResult:
         p = {**self.DEFAULTS, **self.params}

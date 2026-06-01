@@ -61,7 +61,7 @@ class Week52HighStrategy(BaseStrategy):
         return n + 28  # ADX needs 2 × period warm-up
 
     def get_timeframe(self) -> str:
-        return "D"
+        return "1d"
 
     def generate_signal(self, df, symbol: str) -> SignalResult:
         p = {**self.DEFAULTS, **self.params}

@@ -79,7 +79,7 @@ class MacdSma200ChartartStrategy(BaseStrategy):
         return int(p["sma200_period"]) + int(p["signal_period"]) + 10
 
     def get_timeframe(self) -> str:
-        return "1h"
+        return "1d"
 
     def _validate_params(self) -> None:
         p = {**self.DEFAULTS, **self.params}

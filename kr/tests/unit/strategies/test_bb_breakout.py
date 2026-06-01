@@ -62,7 +62,7 @@ class TestBbBreakoutStrategy:
         assert s.get_min_candles() == 50
 
     def test_get_timeframe(self):
-        assert BbBreakoutStrategy({}).get_timeframe() == "1h"
+        assert BbBreakoutStrategy({}).get_timeframe() == "1d"
 
     def test_no_signal_without_squeeze(self):
         """Trending/expanding market → no squeeze → no signal."""

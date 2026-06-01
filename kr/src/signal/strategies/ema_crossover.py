@@ -60,7 +60,7 @@ class EmaCrossoverStrategy(BaseStrategy):
         return max(slow, adx) * 2 + 10
 
     def get_timeframe(self) -> str:
-        return "1h"
+        return "1d"
 
     def _validate_params(self) -> None:
         p = {**self.DEFAULTS, **self.params}

@@ -241,7 +241,7 @@ class TestComputeSymbolIndicators(unittest.TestCase):
         for i, p in enumerate(prices):
             conn.execute(
                 "INSERT INTO klines VALUES (?,?,?,?,?,?,?,?,?)",
-                ("BTCUSDT", "1h", str(i * 3600000),
+                ("BTCUSDT", "1d", str(i * 86400000),
                  str(p * 1.01), str(p * 0.99), str(p),
                  str(p), "1000", str((i + 1) * 3600000)),
             )

@@ -91,7 +91,7 @@ class TestBbRsiChartartStrategy:
         assert BbRsiChartartStrategy({}).get_name() == "bb_rsi_chartart"
 
     def test_get_timeframe(self):
-        assert BbRsiChartartStrategy({}).get_timeframe() == "1h"
+        assert BbRsiChartartStrategy({}).get_timeframe() == "1d"
 
     def test_get_min_candles_default(self):
         # bb_period=200 (default) → 200 + 10 = 210

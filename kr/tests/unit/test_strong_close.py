@@ -65,7 +65,7 @@ class TestStrongCloseDefaults(unittest.TestCase):
         self.assertEqual(StrongCloseStrategy({}).get_name(), "strong_close")
 
     def test_timeframe(self):
-        self.assertEqual(StrongCloseStrategy({}).get_timeframe(), "D")
+        self.assertEqual(StrongCloseStrategy({}).get_timeframe(), "1d")
 
     def test_min_candles_gt_sma_period(self):
         s = StrongCloseStrategy({"sma_period": 20})

@@ -56,7 +56,7 @@ class TestMomentumDefaults(unittest.TestCase):
         self.assertEqual(MomentumStrategy({}).get_name(), "momentum")
 
     def test_timeframe(self):
-        self.assertEqual(MomentumStrategy({}).get_timeframe(), "D")
+        self.assertEqual(MomentumStrategy({}).get_timeframe(), "1d")
 
     def test_min_candles_gt_sma_period(self):
         s = MomentumStrategy({"lookback": 20, "sma_period": 50})

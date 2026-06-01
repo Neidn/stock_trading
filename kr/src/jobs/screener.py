@@ -338,13 +338,13 @@ def _assign_strategy(indicators: dict, strategies: list, conn=None) -> str:
 
 
 def _compute_symbol_indicators(conn, symbol: str) -> dict:
-    """Compute ADX, ATR%, above_sma200 from 1h klines stored in DB.
+    """Compute ADX, ATR%, above_sma200 from daily klines stored in DB.
 
     Returns safe defaults when fewer than 20 rows are available.
     """
     rows = conn.execute(
         "SELECT high, low, close FROM klines"
-        " WHERE symbol=? AND interval_type='1h'"
+        " WHERE symbol=? AND interval_type='1d'"
         " ORDER BY open_time DESC LIMIT 250",
         (symbol,),
     ).fetchall()

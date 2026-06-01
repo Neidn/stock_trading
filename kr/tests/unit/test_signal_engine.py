@@ -124,6 +124,7 @@ def _make_strategy_runner(
     runner = MagicMock()
     runner.run.return_value = signal or SignalResult()
     runner.get_timeframe.return_value = timeframe
+    runner.get_symbol_timeframe.return_value = timeframe
     runner.get_active_strategy_name.return_value = strategy_name
     runner.get_symbol_strategy_name.return_value = strategy_name
     return runner
@@ -343,6 +344,7 @@ class TestProcessAllSymbols(unittest.IsolatedAsyncioTestCase):
 
         runner = MagicMock()
         runner.get_timeframe.return_value = "1m"
+        runner.get_symbol_timeframe.return_value = "1m"
         runner.get_active_strategy_name.return_value = "test"
         runner.get_symbol_strategy_name.return_value = "test"
         good_sig = SignalResult(signal_type="long", strength_score=2,
@@ -366,9 +368,9 @@ class TestTimeframeResolution(unittest.TestCase):
 
     def test_uses_strategy_runner_timeframe(self):
         conn = _make_db()
-        runner = _make_strategy_runner(timeframe="1h")
+        runner = _make_strategy_runner(timeframe="1d")
         engine = SignalEngine(conn=conn, strategy_runner=runner)
-        self.assertEqual(engine._get_timeframe(), "1h")
+        self.assertEqual(engine._get_timeframe(), "1d")
 
     def test_defaults_to_1m_when_no_get_timeframe(self):
         conn = _make_db()

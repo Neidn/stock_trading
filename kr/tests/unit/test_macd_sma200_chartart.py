@@ -59,7 +59,7 @@ class TestMacdSma200Defaults(unittest.TestCase):
         self.assertEqual(MacdSma200ChartartStrategy({}).get_name(), "macd_sma200_chartart")
 
     def test_timeframe(self):
-        self.assertEqual(MacdSma200ChartartStrategy({}).get_timeframe(), "1h")
+        self.assertEqual(MacdSma200ChartartStrategy({}).get_timeframe(), "1d")
 
     def test_min_candles_gt_sma200(self):
         s = MacdSma200ChartartStrategy({})

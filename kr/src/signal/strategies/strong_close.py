@@ -64,7 +64,7 @@ class StrongCloseStrategy(BaseStrategy):
         return sma + 20
 
     def get_timeframe(self) -> str:
-        return "D"
+        return "1d"
 
     def generate_signal(self, df, symbol: str) -> SignalResult:
         p = {**self.DEFAULTS, **self.params}

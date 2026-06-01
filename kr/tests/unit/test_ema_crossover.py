@@ -41,7 +41,7 @@ class TestEmaCrossoverDefaults(unittest.TestCase):
         self.assertEqual(s.get_name(), "ema_crossover")
 
     def test_timeframe(self):
-        self.assertEqual(EmaCrossoverStrategy({}).get_timeframe(), "1h")
+        self.assertEqual(EmaCrossoverStrategy({}).get_timeframe(), "1d")
 
     def test_min_candles_uses_slow_period(self):
         s = EmaCrossoverStrategy({"ema_fast": 20, "ema_slow": 50, "adx_period": 14})

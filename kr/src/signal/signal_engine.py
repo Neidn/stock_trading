@@ -135,7 +135,8 @@ class SignalEngine:
         Returns:
             :class:`SignalResult` or ``None`` when no candles are available.
         """
-        interval = self._get_timeframe()
+        tf_getter = getattr(self._strategy_runner, "get_symbol_timeframe", None)
+        interval = tf_getter(symbol) if callable(tf_getter) else self._get_timeframe()
         rows = get_klines(self._conn, symbol, interval, limit=_DEFAULT_CANDLE_LIMIT)
         if not rows:
             logger.debug("No candles for %s/%s — skipping", symbol, interval)
@@ -214,11 +215,13 @@ class SignalEngine:
         ]
 
     def _get_recent_closes(self, symbol: str) -> list[float]:
-        """Return last _CORR_LOOKBACK 1h closes for *symbol*, oldest first."""
+        """Return last _CORR_LOOKBACK closes for *symbol*, oldest first."""
+        tf_getter = getattr(self._strategy_runner, "get_symbol_timeframe", None)
+        interval = tf_getter(symbol) if callable(tf_getter) else "1d"
         rows = self._conn.execute(
-            "SELECT close FROM klines WHERE symbol=? AND interval_type='1h'"
+            "SELECT close FROM klines WHERE symbol=? AND interval_type=?"
             " ORDER BY open_time DESC LIMIT ?",
-            (symbol, _CORR_LOOKBACK),
+            (symbol, interval, _CORR_LOOKBACK),
         ).fetchall()
         return [float(r[0]) for r in reversed(rows)]
 

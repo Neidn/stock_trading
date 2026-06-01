@@ -54,7 +54,7 @@ class TestConsecutiveDefaults(unittest.TestCase):
         self.assertEqual(ConsecutiveStrategy({}).get_name(), "consecutive")
 
     def test_timeframe(self):
-        self.assertEqual(ConsecutiveStrategy({}).get_timeframe(), "D")
+        self.assertEqual(ConsecutiveStrategy({}).get_timeframe(), "1d")
 
     def test_min_candles_sufficient(self):
         s = ConsecutiveStrategy({"n_days": 3, "sma_period": 20})

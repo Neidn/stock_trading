@@ -68,7 +68,7 @@ class BbRsiChartartStrategy(BaseStrategy):
         return self.params.get("bb_period", 200) + 10
 
     def get_timeframe(self) -> str:
-        return "1h"
+        return "1d"
 
     def _validate_params(self) -> None:
         sl = self.params.get("sl_atr_mult", 2.0)

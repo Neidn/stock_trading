@@ -44,7 +44,7 @@ class TestSupertrendDefaults(unittest.TestCase):
         self.assertEqual(SupertrendStrategy({}).get_name(), "supertrend")
 
     def test_timeframe(self):
-        self.assertEqual(SupertrendStrategy({}).get_timeframe(), "1h")
+        self.assertEqual(SupertrendStrategy({}).get_timeframe(), "1d")
 
     def test_min_candles(self):
         s = SupertrendStrategy({"atr_period": 10})

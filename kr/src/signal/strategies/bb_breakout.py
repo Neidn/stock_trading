@@ -65,7 +65,7 @@ class BbBreakoutStrategy(BaseStrategy):
         return bb_period + squeeze_window + 10
 
     def get_timeframe(self) -> str:
-        return "1h"
+        return "1d"
 
     def _validate_params(self) -> None:
         """Validate parameter constraints.

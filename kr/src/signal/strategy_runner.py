@@ -242,6 +242,12 @@ class StrategyRunner:
             return getter()
         return "1m"
 
+    def get_symbol_timeframe(self, symbol: str) -> str:
+        """Return timeframe for the strategy assigned to this symbol."""
+        strategy = self._get_symbol_strategy(symbol)
+        getter = getattr(strategy, "get_timeframe", None)
+        return getter() if callable(getter) else self.get_timeframe()
+
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------

@@ -38,7 +38,7 @@ class ZscoreReversionStrategy(BaseStrategy):
         return self.params.get("window", 20) * 3
 
     def get_timeframe(self) -> str:
-        return "1h"
+        return "1d"
 
     def _validate_params(self) -> None:
         """Validate parameter constraints.

@@ -79,7 +79,7 @@ class RsiSupertrendStrategy(BaseStrategy):
         return max(atr_period * 3, rsi_period * 2) + 10
 
     def get_timeframe(self) -> str:
-        return "1h"
+        return "1d"
 
     def _validate_params(self) -> None:
         p = {**self.DEFAULTS, **self.params}

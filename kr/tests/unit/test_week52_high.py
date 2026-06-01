@@ -52,7 +52,7 @@ class TestWeek52HighDefaults(unittest.TestCase):
         self.assertEqual(Week52HighStrategy({}).get_name(), "week52_high")
 
     def test_timeframe(self):
-        self.assertEqual(Week52HighStrategy({}).get_timeframe(), "D")
+        self.assertEqual(Week52HighStrategy({}).get_timeframe(), "1d")
 
     def test_min_candles_gt_n_days(self):
         s = Week52HighStrategy({"n_days": 100})

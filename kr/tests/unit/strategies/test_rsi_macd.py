@@ -178,4 +178,4 @@ class TestRsiMacdStrategy:
 
     def test_get_timeframe(self):
         strategy = RsiMacdStrategy({})
-        assert strategy.get_timeframe() == "1h"
+        assert strategy.get_timeframe() == "1d"
