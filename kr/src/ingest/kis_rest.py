@@ -261,6 +261,28 @@ class KISRestClient:
         return data
 
     @with_retry(max_retries=3, delay=1.0)
+    async def _get_order(self, path: str, tr_id: str, params: dict) -> dict:
+        """GET to order/account endpoints — uses self._base (paper-aware) + order token."""
+        assert self._session
+        await self._throttle()
+        token = await self._ensure_token()
+        async with self._session.get(
+            f"{self._base}{path}",
+            headers=self._headers(tr_id, token),
+            params=params,
+        ) as resp:
+            if resp.status == 429:
+                raise RateLimitError(f"KIS rate limit {resp.url}")
+            data = await resp.json(content_type=None)
+        if not isinstance(data, dict):
+            raise NetworkError(f"KIS non-dict response (http={resp.status}): {data!r}")
+        if data.get("rt_cd", "-1") != "0":
+            raise NetworkError(
+                f"KIS error rt_cd={data.get('rt_cd')} msg={data.get('msg1', '')}"
+            )
+        return data
+
+    @with_retry(max_retries=3, delay=1.0)
     async def _post(self, path: str, tr_id: str, body: dict) -> dict:
         assert self._session
         await self._throttle()
@@ -391,7 +413,7 @@ class KISRestClient:
             (both as string KRW amounts).
         """
         tr_id = "VTTC8434R" if self._paper else "TTTC8434R"
-        data = await self._get(
+        data = await self._get_order(
             "/uapi/domestic-stock/v1/trading/inquire-balance",
             tr_id=tr_id,
             params={
@@ -424,7 +446,7 @@ class KISRestClient:
             unrealizedProfit, market.
         """
         tr_id = "VTTC8434R" if self._paper else "TTTC8434R"
-        data = await self._get(
+        data = await self._get_order(
             "/uapi/domestic-stock/v1/trading/inquire-balance",
             tr_id=tr_id,
             params={
@@ -589,7 +611,7 @@ class KISRestClient:
             filled_qty, ord_dvsn, status.
         """
         tr_id = "VTTC8036R" if self._paper else "TTTC8036R"
-        data = await self._get(
+        data = await self._get_order(
             "/uapi/domestic-stock/v1/trading/inquire-psbl-rvsecncl",
             tr_id=tr_id,
             params={
