@@ -1,0 +1,68 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: signal-engine-us
+  namespace: trading-stock-kr
+  labels:
+    app: signal-engine-us
+    app.kubernetes.io/part-of: kr-stock-autotrading
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: signal-engine-us
+  template:
+    metadata:
+      labels:
+        app: signal-engine-us
+    spec:
+      restartPolicy: Always
+
+      nodeSelector:
+        storage: sqlite-node
+
+      containers:
+        - name: signal-engine-us
+          image: ghcr.io/neidn/stock-trading-kr:latest
+          imagePullPolicy: Always
+          command: ["python", "-m", "src.signal.main_us"]
+          ports:
+            - containerPort: 8080
+
+          envFrom:
+            - configMapRef:
+                name: trading-config-us
+            - secretRef:
+                name: trading-secret
+
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            failureThreshold: 3
+
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 15
+
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "384Mi"
+            limits:
+              cpu: "600m"
+              memory: "768Mi"
+
+          volumeMounts:
+            - name: sqlite-data
+              mountPath: /data
+
+      volumes:
+        - name: sqlite-data
+          persistentVolumeClaim:
+            claimName: sqlite-pvc

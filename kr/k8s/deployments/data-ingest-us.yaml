@@ -1,0 +1,51 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: data-ingest-us
+  namespace: trading-stock-kr
+  labels:
+    app: data-ingest-us
+    app.kubernetes.io/part-of: kr-stock-autotrading
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: data-ingest-us
+  template:
+    metadata:
+      labels:
+        app: data-ingest-us
+    spec:
+      restartPolicy: Always
+
+      nodeSelector:
+        storage: sqlite-node
+
+      containers:
+        - name: data-ingest-us
+          image: ghcr.io/neidn/stock-trading-kr:latest
+          imagePullPolicy: Always
+          command: ["python", "-m", "src.ingest.main_us"]
+
+          envFrom:
+            - configMapRef:
+                name: trading-config-us
+            - secretRef:
+                name: trading-secret
+
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "300m"
+              memory: "512Mi"
+
+          volumeMounts:
+            - name: sqlite-data
+              mountPath: /data
+
+      volumes:
+        - name: sqlite-data
+          persistentVolumeClaim:
+            claimName: sqlite-pvc

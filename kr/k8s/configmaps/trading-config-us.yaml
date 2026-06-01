@@ -1,0 +1,37 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: trading-config-us
+  namespace: trading-stock-kr
+  labels:
+    app.kubernetes.io/part-of: kr-stock-autotrading
+data:
+  TRADING_MODE: "paper"        # paper | live
+  LIVE_CONFIRM: "LIVE"
+  MARKET: "US"
+  ACTIVE_STRATEGY: "macd_sma200_chartart"
+
+  STRATEGY_PARAMS_MACD_SMA200_CHARTART: |
+    {"fast_period": 12, "slow_period": 26, "signal_period": 9, "sma200_period": 200,
+    "sl_atr_mult": 2.0, "tp1_atr_mult": 3.0, "tp2_atr_mult": 4.0}
+  STRATEGY_PARAMS_RSI_MACD: |
+    {"rsi_period": 14, "rsi_oversold": 35, "rsi_overbought": 65,
+    "fast_period": 12, "slow_period": 26, "signal_period": 9,
+    "sl_atr_mult": 2.0, "tp1_atr_mult": 3.0, "tp2_atr_mult": 5.0}
+  STRATEGY_PARAMS_EMA_PULLBACK_RSI: |
+    {"ema_fast": 20, "ema_mid": 50, "ema_slow": 200, "rsi_period": 14,
+    "adx_period": 14, "adx_threshold": 25.0, "rsi_low": 45.0, "rsi_high": 65.0,
+    "sl_atr_mult": 2.0, "tp1_atr_mult": 3.0, "tp2_atr_mult": 5.0}
+
+  RISK_PER_TRADE: "0.01"       # 1% per trade
+  MAX_POSITIONS: "5"
+  DAILY_LOSS_LIMIT: "0.05"
+
+  # US_SYMBOLS: override DB symbols — format: "AAPL:NAS,MSFT:NAS,NVDA:NAS"
+  # Leave empty to use symbols table (excd IS NOT NULL AND is_active=1)
+  US_SYMBOLS: ""
+
+  FALLBACK_BALANCE_USD: "10000"  # used in paper mode (VTS doesn't support balance API)
+
+  SQLITE_DB_PATH: "/data/trading.db"
+  LOG_LEVEL: "INFO"

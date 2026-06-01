@@ -161,6 +161,40 @@ def krw_position_size(
     return max(1, shares)
 
 
+def usd_position_size(
+    account_usd: float,
+    risk_pct: float,
+    entry_price: float,
+    sl_price: float,
+) -> int:
+    """Integer share count for US stock long-only trading.
+
+    Formula:
+        risk_amount    = account_usd * risk_pct
+        stop_distance  = entry_price - sl_price   (USD)
+        shares         = floor(risk_amount / stop_distance)
+
+    Args:
+        account_usd: Available USD balance.
+        risk_pct: Fraction of balance to risk per trade, e.g. 0.01 = 1%.
+        entry_price: Intended entry price (USD, float).
+        sl_price: Stop-loss price (USD), must be < entry_price.
+
+    Returns:
+        Integer share quantity >= 1, or 0 when stop_distance <= 0.
+    """
+    stop_distance = entry_price - sl_price
+    if stop_distance <= 0:
+        logger.warning(
+            "usd_position_size: stop_distance <= 0 (entry=%.4f sl=%.4f) — returning 0",
+            entry_price, sl_price,
+        )
+        return 0
+    risk_amount = account_usd * risk_pct
+    shares = int(risk_amount / stop_distance)
+    return max(1, shares)
+
+
 def calc_position_margin(
     position_size: float,
     entry_price: float,
