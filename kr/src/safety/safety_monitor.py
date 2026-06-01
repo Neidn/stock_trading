@@ -22,6 +22,7 @@ Design constraints:
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
@@ -103,7 +104,7 @@ class SafetyMonitor:
                 logger.info("safety_monitor.cancelled")
                 raise
             except Exception as exc:  # noqa: BLE001
-                msg = f"Safety Monitor 에러: {exc}"
+                msg = f"Safety Monitor 에러: {html.escape(str(exc))}"
                 logger.error(msg, exc_info=True)
                 self._notify_critical(msg)
                 await asyncio.sleep(5.0)
@@ -163,7 +164,7 @@ class SafetyMonitor:
                 self._mark_position_closed(pos, price, "sl_hit")
             except Exception as exc:  # noqa: BLE001
                 logger.error("sl.close_failed symbol=%s: %s", symbol, exc)
-                self._notify_critical(f"❗ SL 청산 실패 {symbol}: {exc}")
+                self._notify_critical(f"❗ SL 청산 실패 {symbol}: {html.escape(str(exc))}")
             return True
         return False
 
@@ -240,7 +241,7 @@ class SafetyMonitor:
                 self._mark_position_closed(pos, None, "force_close_eod")
             except Exception as exc:  # noqa: BLE001
                 logger.error("force_close.failed symbol=%s: %s", symbol, exc)
-                self._notify_critical(f"❗ 강제 청산 실패 {symbol}: {exc}")
+                self._notify_critical(f"❗ 강제 청산 실패 {symbol}: {html.escape(str(exc))}")
 
         self._force_closed = True
 
@@ -261,7 +262,7 @@ class SafetyMonitor:
                 if status != 200:
                     self._notify_warning(f"{pod_name} 헬스체크 실패 (HTTP {status})")
             except Exception as exc:  # noqa: BLE001
-                self._notify_warning(f"{pod_name} 응답 없음: {exc}")
+                self._notify_warning(f"{pod_name} 응답 없음: {html.escape(str(exc))}")
 
     # ------------------------------------------------------------------
     # Price helpers

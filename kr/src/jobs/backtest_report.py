@@ -17,6 +17,7 @@ Run:
 
 from __future__ import annotations
 
+import html
 import json
 import logging
 import os
@@ -260,7 +261,7 @@ def run() -> str:
                 best_params = {k: best_result.get(k, current_params[k]) for k in cfg["param_keys"]}
         except Exception as exc:
             logger.warning("Grid failed for %s: %s", name, exc)
-            sections.append(f"<b>▶ {name}</b> — ❌ 오류: {exc}")
+            sections.append(f"<b>▶ {name}</b> — ❌ 오류: {html.escape(str(exc))}")
             continue
 
         section = _format_strategy_section(
