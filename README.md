@@ -1,107 +1,95 @@
-# Stock Trading Screener and Signal System
+# Binance Futures Autotrading
 
-Python project for manually maintained stock watchlists, daily market-data ingestion,
-rule-based screening, strategy signals, risk sizing, and SQLite persistence.
+24/7 automated crypto futures trading system for Binance USDT-M Futures. Prioritizes **liquidation avoidance and uninterrupted operation** over maximum profit.
 
-This project intentionally starts as an alert/signal system. It does not place live
-orders. Add broker execution only after backtesting and paper validation.
+**Status**: Live trading — first position placed 2026-05-21.
 
-## Quick Start
+## Architecture
 
-```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -e ".[dev]"
-
-cp .env.example .env
-python -m stock_trading.cli init-db
-python -m stock_trading.cli ingest --start 2025-01-01
-python -m stock_trading.cli screen
-python -m stock_trading.cli signals --equity 10000
+```
+WebSocket → Data Ingest → Signal Engine → LiquidationGuard → OrderManager
+                ↓                                                   ↓
+           SQLite DB ←──────────────────────────────── Position Tracker
+                ↓
+         Safety Monitor (independent pod)
 ```
 
-Edit `config/watchlist.yml` to set the stocks manually.
+## Tech Stack
 
-## Target Stocks
+| Component | Technology |
+|-----------|-----------|
+| Language | Python 3.13+ |
+| Exchange | ccxt (Binance USDT-M Futures) |
+| Indicators | TA-Lib (C-compiled) |
+| Database | SQLite WAL mode (K8s PVC `/data/trading.db`) |
+| Orchestration | Kubernetes |
+| Alerts/Control | Telegram bot |
+| Dashboard | Flask |
 
-Target stocks are controlled by `config/watchlist.yml`:
+## Strategies
+
+Screener assigns strategy per symbol based on ADX + ATR regime:
+
+| ADX Zone | Strategy | Signal Type |
+|----------|----------|-------------|
+| < 25 (ranging) | `bb_breakout` | Bollinger squeeze breakout |
+| 25–32 (transitioning) | `rsi_supertrend` | SuperTrend flip + RSI confirm |
+| 32–55 (trending) | `ema_pullback_rsi` | Multi-EMA alignment + RSI pullback |
+| 55+ (strong trend) | `macd_sma200_chartart` | MACD cross + SMA200 filter |
+
+All strategies inherit `BaseStrategy`. Hot-swap via `ACTIVE_STRATEGY` ConfigMap — no code changes needed.
+
+## K8s Pods
+
+| Pod | Role | Schedule |
+|-----|------|----------|
+| `signal-engine` | Strategy execution + order placement | Continuous (1h cycle) |
+| `data-ingest` | WebSocket candle collection | Continuous |
+| `safety-monitor` | Emergency stop, liquidation watch | Continuous |
+| `dashboard` | Flask UI | Continuous |
+| `screener` | Symbol selection + strategy assignment | Daily 00:00 UTC |
+| `position-sync` | Reconcile DB with Binance | Every 30 min |
+| `db-archiver` | Archive old candles | Weekly |
+
+## Configuration
+
+All runtime config via K8s ConfigMap (`k8s/configmaps/trading-config.yaml`):
 
 ```yaml
-symbols:
-  - AAPL
-  - MSFT
-  - NVDA
+ACTIVE_STRATEGY: "ema_pullback_rsi"   # fallback; screener assigns per symbol
+TRADING_MODE: "live"                  # testnet | live
+MAX_POSITIONS: "3"
+RISK_PER_TRADE: "0.005"              # 0.5% per trade
+MAX_LEVERAGE: "3"
+DAILY_LOSS_LIMIT: "0.03"             # 3% daily drawdown halt
 ```
 
-Use uppercase ticker symbols. Keep the list small while validating the strategy;
-start with liquid stocks or ETFs you can review manually. After editing the
-list, run:
+Secrets (`k8s/secrets/`): Binance API keys, Telegram token.
+
+## Development
 
 ```bash
-python -m stock_trading.cli run-daily --start 2025-01-01 --equity 10000
+pip install -r requirements.txt
+python -m pytest tests/
+python -m pytest tests/test_strategy.py  # single file
 ```
 
-The pipeline ingests bars for those symbols, screens them, and stores generated
-signals with entry, stop, target, share count, risk, status, and expiry values.
+## Design Principles
 
-## Docker Image CI
+**Liquidation Avoidance** — #1 priority:
+- `LiquidationGuard`: WATCH → WARNING → CRITICAL levels
+- At CRITICAL: auto-reduce positions before liquidation
+- `SafetyMonitor` in separate pod — survives main pod crashes
+- Telegram `/emergency_close` closes all positions immediately
 
-GitHub Actions builds and pushes a Docker image on pushes to `main` after tests
-pass. Add these repository secrets in GitHub:
+**Data Integrity**:
+- Full state written to SQLite after every order/position change
+- Never trust in-memory state; re-read DB on recovery
+- `position-sync` CronJob: exchange API is ground truth
 
-- `DOCKERHUB_TOKEN`
+**Strategy Swap**:
+- Change `ACTIVE_STRATEGY` in ConfigMap + `kubectl rollout restart` — zero code changes
+- Screener auto-assigns per-symbol strategy based on live market regime
 
-The workflow pushes:
-
-```text
-neidn/stock-trading:latest
-neidn/stock-trading:main
-neidn/stock-trading:sha-<commit>
-```
-
-For `DOCKERHUB_TOKEN`, paste only the raw access-token value, not the token name,
-`Bearer ...`, quotes, or extra lines.
-
-## Commands
-
-```bash
-# Create SQLite tables
-python -m stock_trading.cli init-db
-
-# Download daily OHLCV for symbols in config/watchlist.yml
-python -m stock_trading.cli ingest --start 2025-01-01
-
-# Run the screener and persist results
-python -m stock_trading.cli screen
-
-# Generate strategy signals for the latest screened symbols
-python -m stock_trading.cli signals --equity 10000
-
-# Ingest, screen, and generate signals in one run
-python -m stock_trading.cli run-daily --start 2025-01-01 --equity 10000
-```
-
-## Project Layout
-
-```text
-src/stock_trading/
-  alerts/        Console and future notification formatters
-  data/          Market-data providers and ingestion
-  db.py          SQLite schema and repository helpers
-  risk/          Position sizing and portfolio limits
-  screener/      Screening rules and engine
-  signals/       Signal orchestration
-  strategies/    Strategy implementations
-  cli.py         Command-line entry point
-  config.py      Runtime settings and watchlist loading
-```
-
-## Safety Position
-
-- Manual stock list only.
-- No live execution module in the initial build.
-- Risk sizing is calculated for review; it is not sent to a broker.
-- Signals include entry, stop, target, risk amount, and share quantity.
-- Treat all output as research until validated with historical and paper results.
-
-See `docs/IMPLEMENTATION.md` for the implementation plan and next phases.
+**Binance Account Requirements**:
+- Position mode: **Hedge Mode** (supports simultaneous LONG/SHORT per symbol)

@@ -19,3 +19,6 @@ AGENTS.md
 CLAUDE.md
 .claude
 guidance/
+**/secrets
+data/backtest/*.csv
+data/backtest/*.parquet

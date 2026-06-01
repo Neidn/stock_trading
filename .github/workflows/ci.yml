@@ -1,4 +1,4 @@
-name: CI (KR)
+name: CI
 
 on:
   push:
@@ -11,9 +11,11 @@ on:
       - "guidance/**"
   pull_request:
     paths:
-      - "kr/**"
-      - "!kr/k8s/**"
-      - ".github/workflows/ci-kr.yml"
+      - "src/**"
+      - "tests/**"
+      - "Dockerfile"
+      - "requirements.txt"
+      - ".github/workflows/ci.yml"
   workflow_dispatch:
 
 env:
@@ -24,9 +26,6 @@ jobs:
   # ── Job 1: lint ──────────────────────────────────────────────────────────────
   lint:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: kr
 
     steps:
       - name: Check out repository
@@ -61,9 +60,6 @@ jobs:
   # ── Job 2: test ──────────────────────────────────────────────────────────────
   test:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: kr
 
     steps:
       - name: Check out repository
@@ -135,7 +131,7 @@ jobs:
         id: build
         uses: docker/build-push-action@v5
         with:
-          context: kr
+          context: .
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
           outputs: type=image,name=${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
