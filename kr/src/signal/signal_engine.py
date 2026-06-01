@@ -280,7 +280,7 @@ class SignalEngine:
         from src.utils.config import load_config  # lazy
         config = load_config()
 
-        # Balance: KIS REST → available KRW
+        # Balance: KIS REST → startup_recovery cache → env fallback
         balance_krw = 0.0
         if self._kis is not None:
             try:
@@ -292,6 +292,9 @@ class SignalEngine:
             from src.utils.startup_recovery import get_cached_balance  # lazy
             cached = get_cached_balance()
             balance_krw = float(cached.get("availableBalance", 0) or 0)
+        if balance_krw <= 0:
+            import os
+            balance_krw = float(os.getenv("FALLBACK_BALANCE_KRW", "10000000"))
 
         strategy_name = getattr(self._strategy_runner, "get_symbol_strategy_name",
                                 lambda s: None)(symbol) or \
