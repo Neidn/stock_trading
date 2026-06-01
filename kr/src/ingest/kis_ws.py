@@ -188,6 +188,7 @@ class KISWSManager:
     async def connect_with_retry(self, ticker: str, approval_key: str) -> None:
         delay = 1
         attempt = 0
+        alerted = False   # True once a persistent-disconnect Telegram was sent
         if not hasattr(self, "_last_prices"):
             self._last_prices: dict[str, int] = {}
 
@@ -205,8 +206,9 @@ class KISWSManager:
                     delay = 1
                     logger.info("KIS WS %s connected", ticker)
 
-                    if attempt > 1 and self._telegram:
+                    if alerted and self._telegram:
                         self._telegram.send_info(f"✅ KIS WS {ticker} 재연결 성공")
+                        alerted = False
 
                     # Send subscription message
                     await ws.send_str(json.dumps({
@@ -229,14 +231,17 @@ class KISWSManager:
             except asyncio.CancelledError:
                 return
             except Exception as exc:
+                safe_exc = str(exc).replace("<", "(").replace(">", ")")
                 logger.warning(
                     "KIS WS %s disconnected (%s), reconnect in %ds",
-                    ticker, exc, delay,
+                    ticker, safe_exc, delay,
                 )
-                if self._telegram:
+                # Only alert after backoff reaches 60s (persistent failure)
+                if delay >= 60 and self._telegram and not alerted:
                     self._telegram.send_warning(
-                        f"⚠️ KIS WS {ticker} 끊김 — {delay}초 후 재연결"
+                        f"⚠️ KIS WS {ticker} 지속 끊김 — {safe_exc}"
                     )
+                    alerted = True
 
             self._ws_connections.pop(ticker, None)
             try:
