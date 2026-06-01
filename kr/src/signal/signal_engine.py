@@ -280,9 +280,12 @@ class SignalEngine:
         from src.utils.config import load_config  # lazy
         config = load_config()
 
-        # Balance: KIS REST → startup_recovery cache → env fallback
+        # Balance: live KIS REST → startup_recovery cache → env fallback
+        # Paper mode KIS does not support inquire-balance — skip REST fetch.
+        import os
+        is_paper = os.getenv("TRADING_MODE", "paper").strip().lower() != "live"
         balance_krw = 0.0
-        if self._kis is not None:
+        if self._kis is not None and not is_paper:
             try:
                 raw = await self._kis.fetch_account_balance()
                 balance_krw = float(raw.get("availableBalance", 0) or 0)
@@ -293,7 +296,6 @@ class SignalEngine:
             cached = get_cached_balance()
             balance_krw = float(cached.get("availableBalance", 0) or 0)
         if balance_krw <= 0:
-            import os
             balance_krw = float(os.getenv("FALLBACK_BALANCE_KRW", "10000000"))
 
         strategy_name = getattr(self._strategy_runner, "get_symbol_strategy_name",
