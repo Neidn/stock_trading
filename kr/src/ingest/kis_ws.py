@@ -331,10 +331,6 @@ class KISWSManager:
                         "KIS WS %s: no message for %.0fs — forcing reconnect",
                         ticker, silence,
                     )
-                    if self._telegram:
-                        self._telegram.send_warning(
-                            f"⚠️ KIS WS {ticker} {silence:.0f}초 침묵 — watchdog 재연결"
-                        )
                     ws = self._ws_connections.pop(ticker, None)
                     if ws and not ws.closed:
                         await ws.close()
