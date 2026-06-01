@@ -1,0 +1,75 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dashboard
+  namespace: trading-stock-kr
+  labels:
+    app: dashboard
+    app.kubernetes.io/part-of: kr-stock-autotrading
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: dashboard
+  template:
+    metadata:
+      labels:
+        app: dashboard
+    spec:
+      restartPolicy: Always
+
+      # Needs access to the SQLite PVC on the storage node
+      nodeSelector:
+        storage: sqlite-node
+
+      containers:
+        - name: dashboard
+          image: ghcr.io/neidn/stock-trading-kr:latest
+          imagePullPolicy: Always
+          command: ["python", "-m", "src.monitoring.dashboard"]
+          ports:
+            - containerPort: 5000
+
+          env:
+            - name: SQLITE_DB_PATH
+              value: /data/trading.db
+            - name: DASHBOARD_PORT
+              value: "5000"
+
+          envFrom:
+            - configMapRef:
+                name: trading-config
+            - secretRef:
+                name: trading-secret
+
+          livenessProbe:
+            httpGet:
+              path: /api/status
+              port: 5000
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            failureThreshold: 3
+
+          readinessProbe:
+            httpGet:
+              path: /api/status
+              port: 5000
+            initialDelaySeconds: 5
+            periodSeconds: 15
+
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "128Mi"
+            limits:
+              cpu: "200m"
+              memory: "256Mi"
+
+          volumeMounts:
+            - name: sqlite-data
+              mountPath: /data
+
+      volumes:
+        - name: sqlite-data
+          persistentVolumeClaim:
+            claimName: sqlite-pvc

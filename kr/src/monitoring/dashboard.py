@@ -1,25 +1,24 @@
-"""Flask monitoring dashboard.
-
-Serves read-only HTML/JSON views of the trading DB.
+"""KRX trading dashboard — read-only Flask app for monitoring.
 
 Routes:
-    /                → main: P&L summary, safe mode, trading mode
-    /positions       → open positions + liquidation distance
-    /liquidation     → liquidation risk monitor
-    /safety          → SafeMode / market shock status
-    /orders          → recent order history
-    /performance     → Sharpe, MDD, win rate, liquidation count
-    /screener        → active symbol list
-    /system          → DB stats, candle freshness
-    /api/status      → K8s liveness/readiness probe (JSON)
+    /               → Home: balance, open positions summary, today's PnL
+    /positions      → Open positions detail
+    /signals        → Recent signals (blocked + unblocked)
+    /orders         → Recent orders
+    /performance    → Daily & per-strategy breakdown
+    /screener       → Active symbols list
+    /system         → DB stats, candle freshness
+    /api/status     → Liveness/readiness probe (JSON)
 
 Run standalone::
 
     DB_PATH=/data/trading.db python -m src.monitoring.dashboard
 
 Environment variables:
-    SQLITE_DB_PATH   Path to SQLite DB (default /data/trading.db)
-    DASHBOARD_PORT   HTTP port (default 5000)
+    SQLITE_DB_PATH       Path to SQLite DB (default /data/trading.db)
+    DASHBOARD_PORT       HTTP port (default 5000)
+    TRADING_MODE         paper | live
+    FALLBACK_BALANCE_KRW Available KRW balance fallback
 """
 
 from __future__ import annotations
@@ -27,10 +26,8 @@ from __future__ import annotations
 import logging
 import os
 import sqlite3
-import time
 from datetime import date, datetime, timedelta, timezone
 
-import ccxt
 from flask import Flask, jsonify, render_template_string
 
 logging.basicConfig(level=logging.INFO)
@@ -39,80 +36,11 @@ _log = logging.getLogger(__name__)
 app = Flask(__name__)
 
 _DB_PATH = os.environ.get("SQLITE_DB_PATH", "/data/trading.db")
+_KST = timezone(timedelta(hours=9))
 
 
 # ---------------------------------------------------------------------------
-# Balance cache (avoid hammering exchange on every page load)
-# ---------------------------------------------------------------------------
-
-_balance_cache: dict = {}
-_balance_cache_time: float = 0.0
-_BALANCE_TTL = 60  # seconds
-_balance_error: str = ""
-
-
-def _get_exchange() -> ccxt.Exchange:
-    trading_mode = os.environ.get("TRADING_MODE", "testnet").lower()
-    if trading_mode == "testnet":
-        api_key = os.environ.get("BINANCE_DEMO_API_KEY") or os.environ.get("BINANCE_API_KEY", "")
-        api_secret = os.environ.get("BINANCE_DEMO_API_SECRET") or os.environ.get("BINANCE_API_SECRET", "")
-    else:
-        api_key = os.environ.get("BINANCE_API_KEY", "")
-        api_secret = os.environ.get("BINANCE_API_SECRET", "")
-    exchange = ccxt.binanceusdm({"apiKey": api_key, "secret": api_secret, "options": {"defaultType": "future"}})
-    if trading_mode == "testnet":
-        exchange.enable_demo_trading(True)
-    return exchange
-
-
-def _fetch_balance() -> dict:
-    """Return {wallet, equity, free, used, error} from exchange. Cached 60s.
-
-    wallet = walletBalance (realized only, matches Binance console "Wallet Balance")
-    equity = marginBalance = wallet + unrealizedProfit
-    """
-    global _balance_cache, _balance_cache_time, _balance_error
-    if time.time() - _balance_cache_time < _BALANCE_TTL and _balance_cache:
-        return _balance_cache
-    try:
-        raw = _get_exchange().fetch_balance()
-        wallet = None
-        equity = None
-        free = None
-
-        # Try raw info.assets first — most precise field names
-        if "info" in raw:
-            assets = raw["info"].get("assets", [])
-            for a in assets:
-                if a.get("asset") == "USDT":
-                    wallet = float(a.get("walletBalance") or 0)
-                    equity = float(a.get("marginBalance") or wallet)
-                    free = float(a.get("availableBalance") or 0)
-                    break
-
-        # Fallback: ccxt normalized (total = marginBalance in futures)
-        if wallet is None:
-            usdt = raw.get("USDT") or raw.get("usdt") or {}
-            equity = float(usdt.get("total") or 0) if usdt else None
-            free = float(usdt.get("free") or 0) if usdt else None
-            wallet = equity  # walletBalance not available via ccxt normalized
-
-        used = (equity - free) if (equity is not None and free is not None) else None
-        _balance_cache = {
-            "wallet": wallet, "equity": equity,
-            "free": free, "used": used, "error": None,
-        }
-        _balance_error = ""
-        _balance_cache_time = time.time()
-    except Exception as exc:
-        _log.exception("fetch_balance failed")
-        _balance_error = str(exc)
-        _balance_cache = {"wallet": None, "equity": None, "free": None, "used": None, "error": str(exc)}
-    return _balance_cache
-
-
-# ---------------------------------------------------------------------------
-# DB helper
+# DB helpers
 # ---------------------------------------------------------------------------
 
 def _get_conn() -> sqlite3.Connection:
@@ -137,89 +65,68 @@ def _q1(sql: str, params: tuple = ()) -> sqlite3.Row | None:
         conn.close()
 
 
-def _regime_info() -> dict:
-    """Compute BTC ADX from klines and derive regime/limit/TP-scale info."""
-    try:
-        import numpy as np
-        import talib
+def _krw(v) -> str:
+    if v is None:
+        return "—"
+    f = float(v)
+    return f"{f:,.0f} 원"
 
-        rows = _q(
-            "SELECT high, low, close FROM klines WHERE symbol='BTCUSDT' "
-            "ORDER BY open_time DESC LIMIT 60"
-        )
-        if len(rows) < 30:
-            raise ValueError("insufficient BTC candles")
-        rows = list(reversed(rows))
-        high  = np.array([float(r["high"])  for r in rows])
-        low   = np.array([float(r["low"])   for r in rows])
-        close = np.array([float(r["close"]) for r in rows])
-        adx_arr = talib.ADX(high, low, close, timeperiod=14)
-        adx = float(adx_arr[-1])
-        if np.isnan(adx):
-            raise ValueError("ADX is NaN")
-    except Exception:
-        return {"adx": None, "label": "unknown", "label_cls": "warn",
-                "limit": "?", "base": "?", "tp_scale": 1.0}
 
-    if adx >= 25:
-        label, label_cls = "TRENDING", "ok"
-    elif adx >= 20:
-        label, label_cls = "WEAK", "warn"
-    else:
-        label, label_cls = "RANGING", "danger"
-
-    try:
-        from src.signal.signal_blocker import _dynamic_max_positions
-        from src.utils.config import load_config
-        base = load_config().max_positions
-        limit = _dynamic_max_positions(adx, base)
-    except Exception:
-        base, limit = "?", "?"
-
-    tp_scale = max(0.75, min(1.25, 1.0 + (adx - 25.0) * 0.01))
-    return {"adx": adx, "label": label, "label_cls": label_cls,
-            "limit": limit, "base": base, "tp_scale": tp_scale}
+def _pct(v) -> str:
+    if v is None:
+        return "—"
+    return f"{float(v):+.2f}%"
 
 
 # ---------------------------------------------------------------------------
-# Shared HTML shell
+# HTML shell
 # ---------------------------------------------------------------------------
 
 _NAV = """
-<nav style="font-family:monospace;padding:8px;background:#111;color:#aaa">
-  <a href="/" style="color:#4af;margin-right:12px">Home</a>
-  <a href="/positions" style="color:#4af;margin-right:12px">Positions</a>
-  <a href="/trades" style="color:#4af;margin-right:12px">Trades</a>
-  <a href="/liquidation" style="color:#4af;margin-right:12px">Liquidation</a>
-  <a href="/safety" style="color:#4af;margin-right:12px">Safety</a>
-  <a href="/orders" style="color:#4af;margin-right:12px">Orders</a>
-  <a href="/performance" style="color:#4af;margin-right:12px">Performance</a>
-  <a href="/screener" style="color:#4af;margin-right:12px">Screener</a>
+<nav style="font-family:monospace;padding:8px 16px;background:#111;color:#aaa;display:flex;gap:16px;flex-wrap:wrap">
+  <a href="/" style="color:#4af">Home</a>
+  <a href="/positions" style="color:#4af">Positions</a>
+  <a href="/signals" style="color:#4af">Signals</a>
+  <a href="/orders" style="color:#4af">Orders</a>
+  <a href="/performance" style="color:#4af">Performance</a>
+  <a href="/screener" style="color:#4af">Screener</a>
   <a href="/system" style="color:#4af">System</a>
 </nav>
 """
 
 _STYLE = """
 <style>
-  body{background:#0d0d0d;color:#e0e0e0;font-family:monospace;padding:16px}
-  h2{color:#4af}
-  table{border-collapse:collapse;width:100%}
-  th{background:#1a1a2e;color:#7af;text-align:left;padding:6px 10px}
-  td{padding:5px 10px;border-bottom:1px solid #222}
-  tr:hover td{background:#1a1a1a}
+  body{background:#0d0d0d;color:#e0e0e0;font-family:monospace;padding:16px;margin:0}
+  h2{color:#4af;margin-top:8px}
+  h3{color:#7af;margin-top:20px}
+  table{border-collapse:collapse;width:100%;margin-bottom:16px}
+  th{background:#1a1a2e;color:#7af;text-align:left;padding:6px 12px;white-space:nowrap}
+  td{padding:5px 12px;border-bottom:1px solid #1e1e1e;white-space:nowrap}
+  tr:hover td{background:#131320}
   .ok{color:#4f4}
   .warn{color:#fa4}
   .danger{color:#f44}
-  .badge{display:inline-block;padding:2px 8px;border-radius:4px;font-size:0.85em}
+  .muted{color:#666}
+  .badge{display:inline-block;padding:2px 8px;border-radius:4px;font-size:0.82em;font-weight:bold}
   .badge-ok{background:#1a3d1a;color:#4f4}
   .badge-warn{background:#3d2a00;color:#fa4}
   .badge-danger{background:#3d0000;color:#f44}
+  .badge-blue{background:#0a2040;color:#4af}
+  .ts{color:#555;font-size:0.8em}
 </style>
 """
 
 
 def _page(title: str, body: str) -> str:
-    return f"<!DOCTYPE html><html><head><title>{title}</title>{_STYLE}</head><body>{_NAV}<h2>{title}</h2>{body}</body></html>"
+    now_kst = datetime.now(_KST).strftime("%Y-%m-%d %H:%M:%S KST")
+    refresh = f'<p class="ts">Updated: {now_kst} &nbsp;<a href="" style="color:#4af">↺</a></p>'
+    return (
+        f"<!DOCTYPE html><html><head>"
+        f"<meta charset=utf-8><title>KRX Trading — {title}</title>"
+        f"<meta name='viewport' content='width=device-width,initial-scale=1'>"
+        f"{_STYLE}</head>"
+        f"<body>{_NAV}<h2>{title}</h2>{body}{refresh}</body></html>"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -228,84 +135,62 @@ def _page(title: str, body: str) -> str:
 
 @app.route("/")
 def index():
-    today = date.today().isoformat()
+    trading_mode = os.environ.get("TRADING_MODE", "paper").upper()
+    balance_krw = float(os.environ.get("FALLBACK_BALANCE_KRW", "0") or 0)
+
+    today_kst = datetime.now(_KST).date().isoformat()
 
     today_stats = _q1(
         """SELECT COUNT(*) AS n,
                   SUM(CASE WHEN CAST(realized_pnl AS REAL) > 0 THEN 1 ELSE 0 END) AS wins,
                   SUM(CAST(realized_pnl AS REAL)) AS net
-           FROM positions WHERE status='closed' AND DATE(closed_at)=?""",
-        (today,),
-    )
-    unrealized = _q1(
-        "SELECT COALESCE(SUM(CAST(unrealized_pnl AS REAL)),0) AS u FROM positions WHERE status='open'"
+           FROM positions WHERE status='closed' AND DATE(closed_at) = ?""",
+        (today_kst,),
     )
     open_count = _q1("SELECT COUNT(*) AS c FROM positions WHERE status='open'")
-    safe_mode = _q1("SELECT action, reason, created_at FROM safe_mode_events ORDER BY rowid DESC LIMIT 1")
-    trading_mode = os.environ.get("TRADING_MODE", "testnet").upper()
-
-    total_trades = today_stats["n"] or 0 if today_stats else 0
-    wins = today_stats["wins"] or 0 if today_stats else 0
-    today_pnl = float(today_stats["net"] or 0) if today_stats else 0.0
-    u_pnl = float(unrealized["u"] or 0) if unrealized else 0.0
-    n_open = open_count["c"] if open_count else 0
-    win_rate = (wins / total_trades * 100) if total_trades else 0.0
-
-    regime = _regime_info()
-    dir_counts = _q(
-        "SELECT side, COUNT(*) AS c FROM positions WHERE status='open' GROUP BY side"
+    recent_signals = _q(
+        """SELECT symbol, signal_type, strategy_name, strength_score, blocked, created_at
+           FROM signals ORDER BY created_at DESC LIMIT 8"""
     )
-    dir_map = {r["side"]: r["c"] for r in dir_counts}
-    longs  = dir_map.get("long", 0)
-    shorts = dir_map.get("short", 0)
 
-    balance = _fetch_balance()
-    sm_active = safe_mode and safe_mode["action"] == "activated"
-    sm_reason_index = (safe_mode["reason"] or "") if safe_mode else ""
-    sm_badge = '<span class="badge badge-danger">ACTIVE</span>' if sm_active else '<span class="badge badge-ok">OFF</span>'
-    mode_badge = f'<span class="badge badge-{"warn" if trading_mode=="TESTNET" else "danger"}">{trading_mode}</span>'
+    n_open = (open_count["c"] if open_count else 0) or 0
+    total_trades = (today_stats["n"] or 0) if today_stats else 0
+    wins = (today_stats["wins"] or 0) if today_stats else 0
+    today_pnl = float(today_stats["net"] or 0) if today_stats else 0.0
+    win_rate = wins / total_trades * 100 if total_trades else 0.0
 
-    pnl_class = "ok" if today_pnl >= 0 else "danger"
-    u_class = "ok" if u_pnl >= 0 else "danger"
+    mode_cls = "warn" if trading_mode == "PAPER" else "danger"
+    pnl_cls = "ok" if today_pnl >= 0 else "danger"
 
-    bal_wallet = f"{balance['wallet']:.2f} USDT" if balance["wallet"] is not None else "N/A"
-    bal_equity = f"{balance['equity']:.2f} USDT" if balance["equity"] is not None else "N/A"
-    bal_free   = f"{balance['free']:.2f} USDT"   if balance["free"]   is not None else "N/A"
-    bal_used   = f"{balance['used']:.2f} USDT"   if balance["used"]   is not None else "N/A"
-    bal_err    = balance.get("error") or ""
-    bal_err_row = f'<tr><td colspan="2" class="danger" style="font-size:0.8em">⚠ {bal_err}</td></tr>' if bal_err else ""
+    sig_rows = ""
+    for s in recent_signals:
+        b = bool(s["blocked"])
+        b_cls = "muted" if b else ("ok" if s["signal_type"] == "long" else "warn")
+        b_txt = '<span class="muted">[blocked]</span> ' if b else ""
+        sig_rows += (
+            f"<tr><td>{s['symbol']}</td>"
+            f"<td class='{b_cls}'>{b_txt}{s['signal_type']}</td>"
+            f"<td>{s['strategy_name'] or '—'}</td>"
+            f"<td>{s['strength_score'] or '—'}</td>"
+            f"<td class='ts'>{(s['created_at'] or '')[:16]}</td></tr>"
+        )
 
-    adx_str    = f"{regime['adx']:.1f}" if regime["adx"] is not None else "N/A"
-    tp_str     = f"×{regime['tp_scale']:.2f}" if regime["adx"] is not None else "N/A"
-    limit_str  = f"{regime['limit']} / {regime['base']}"
-    lc         = regime["label_cls"]
+    sig_table = (
+        f"<table><tr><th>Symbol</th><th>Signal</th><th>Strategy</th><th>Score</th><th>Time</th></tr>"
+        f"{sig_rows}</table>"
+        if sig_rows else "<p class='muted'>No signals yet.</p>"
+    )
 
     body = f"""
-    <table>
-      <tr><th>Trading Mode</th><td>{mode_badge}</td></tr>
-      <tr><th>Safe Mode</th><td>{sm_badge} {(safe_mode["reason"] or "") if sm_active else ""}</td></tr>
-      <tr><th colspan="2" style="color:#7af;padding-top:10px">📡 Regime (BTC ADX)</th></tr>
-      <tr><th>BTC ADX</th><td class="{lc}"><b>{adx_str}</b> — {regime['label']}</td></tr>
-      <tr><th>Position Limit</th><td>{limit_str}</td></tr>
-      <tr><th>TP Scale</th><td>{tp_str}</td></tr>
-      <tr><th>Direction Mix</th><td>
-        <span class="ok">{longs}L</span> / <span class="danger">{shorts}S</span>
-        &nbsp;({n_open} total)
-      </td></tr>
-      <tr><th colspan="2" style="color:#7af;padding-top:10px">💰 Balance</th></tr>
-      {bal_err_row}
-      <tr><th>Wallet Balance</th><td><b>{bal_wallet}</b></td></tr>
-      <tr><th>Total Equity (incl. uPnL)</th><td>{bal_equity}</td></tr>
-      <tr><th>Available (Free)</th><td class="ok">{bal_free}</td></tr>
-      <tr><th>In Use (Margin)</th><td class="warn">{bal_used}</td></tr>
-      <tr><th colspan="2" style="color:#7af;padding-top:10px">📊 P&amp;L</th></tr>
-      <tr><th>Open Positions</th><td>{n_open}</td></tr>
-      <tr><th>Today Realised PnL</th><td class="{pnl_class}">{today_pnl:+.2f} USDT</td></tr>
-      <tr><th>Unrealised PnL</th><td class="{u_class}">{u_pnl:+.2f} USDT</td></tr>
-      <tr><th>Today Win Rate</th><td>{win_rate:.1f}% ({wins}/{total_trades})</td></tr>
+    <table style="width:auto;margin-bottom:20px">
+      <tr><th>Mode</th><td><span class="badge badge-{mode_cls}">{trading_mode}</span></td></tr>
+      <tr><th>Available Balance</th><td><b>{_krw(balance_krw) if balance_krw else '—'}</b></td></tr>
+      <tr><th>Open Positions</th><td><b>{n_open}</b></td></tr>
+      <tr><th>Today Closed Trades</th><td>{total_trades} &nbsp;({wins}W / {total_trades - wins}L) &nbsp;{win_rate:.1f}%</td></tr>
+      <tr><th>Today Realized PnL</th><td class="{pnl_cls}"><b>{_krw(today_pnl)}</b></td></tr>
     </table>
-    <p style="color:#555;font-size:0.8em">Refreshed: {datetime.now(timezone.utc).astimezone(timezone(timedelta(hours=9))).strftime("%Y-%m-%d %H:%M:%S")} KST
-    &nbsp;<a href="/" style="color:#4af">↺</a></p>
+    <h3>Recent Signals</h3>
+    {sig_table}
     """
     return _page("Dashboard", body)
 
@@ -313,226 +198,138 @@ def index():
 @app.route("/positions")
 def positions():
     rows = _q(
-        """SELECT symbol, side, quantity, entry_price, liquidation_price,
-                  stop_loss, take_profit_1, unrealized_pnl, leverage, opened_at
-           FROM positions WHERE status='open' ORDER BY opened_at"""
+        """SELECT symbol, side, quantity, entry_price, stop_loss, take_profit_1, take_profit_2,
+                  realized_pnl, unrealized_pnl, strategy_name, trading_mode,
+                  market, opened_at, t2_settle_date
+           FROM positions WHERE status='open' ORDER BY opened_at DESC"""
     )
     if not rows:
-        return _page("Open Positions", "<p>No open positions.</p>")
+        return _page("Open Positions", "<p class='muted'>No open positions.</p>")
 
-    header = "<tr><th>Symbol</th><th>Side</th><th>Qty</th><th>Entry</th><th>Liq Price</th><th>SL</th><th>TP1</th><th>uPnL</th><th>Lev</th><th>Opened</th></tr>"
+    header = (
+        "<tr><th>Symbol</th><th>Market</th><th>Qty</th><th>Entry</th>"
+        "<th>SL</th><th>TP1</th><th>TP2</th>"
+        "<th>uPnL</th><th>Strategy</th><th>Mode</th><th>T+2</th><th>Opened (KST)</th></tr>"
+    )
     trs = []
     for r in rows:
         entry = float(r["entry_price"] or 0)
-        liq = float(r["liquidation_price"] or 0)
-        pnl = float(r["unrealized_pnl"] or 0)
-        dist_pct = abs((liq - entry) / entry * 100) if entry else 0
-        dist_class = "danger" if dist_pct < 5 else ("warn" if dist_pct < 10 else "ok")
-        pnl_class = "ok" if pnl >= 0 else "danger"
+        sl = float(r["stop_loss"] or 0)
+        upnl = float(r["unrealized_pnl"] or 0)
+        upnl_cls = "ok" if upnl >= 0 else "danger"
+        sl_pct = (entry - sl) / entry * 100 if entry and sl else 0
+        sl_str = f"{_krw(sl)} ({sl_pct:.1f}%)" if sl else "—"
+        mode_cls = "warn" if (r["trading_mode"] or "paper") == "paper" else "ok"
         trs.append(
-            f"<tr><td>{r['symbol']}</td><td>{r['side'].upper()}</td>"
-            f"<td>{r['quantity']}</td><td>{entry:.4f}</td>"
-            f"<td class='{dist_class}'>{liq:.4f} ({dist_pct:.1f}%)</td>"
-            f"<td>{r['stop_loss'] or '-'}</td><td>{r['take_profit_1'] or '-'}</td>"
-            f"<td class='{pnl_class}'>{pnl:+.2f}</td>"
-            f"<td>{r['leverage']}x</td><td>{r['opened_at']}</td></tr>"
+            f"<tr>"
+            f"<td><b>{r['symbol']}</b></td>"
+            f"<td>{r['market'] or 'KOSPI'}</td>"
+            f"<td>{r['quantity']}</td>"
+            f"<td>{_krw(entry)}</td>"
+            f"<td class='warn'>{sl_str}</td>"
+            f"<td>{_krw(r['take_profit_1']) if r['take_profit_1'] else '—'}</td>"
+            f"<td>{_krw(r['take_profit_2']) if r['take_profit_2'] else '—'}</td>"
+            f"<td class='{upnl_cls}'>{_krw(upnl)}</td>"
+            f"<td>{r['strategy_name'] or '—'}</td>"
+            f"<td class='{mode_cls}'>{r['trading_mode'] or 'paper'}</td>"
+            f"<td class='ts'>{r['t2_settle_date'] or '—'}</td>"
+            f"<td class='ts'>{(r['opened_at'] or '')[:16]}</td>"
+            f"</tr>"
         )
     body = f"<table>{header}{''.join(trs)}</table>"
     return _page("Open Positions", body)
 
 
-@app.route("/trades")
-def trades():
+@app.route("/signals")
+def signals():
     rows = _q(
-        """SELECT symbol, side, entry_price, exit_price, quantity, realized_pnl,
-                  close_reason, opened_at, closed_at
-           FROM positions WHERE status='closed'
-           ORDER BY closed_at DESC LIMIT 100"""
+        """SELECT symbol, signal_type, strategy_name, strength_score,
+                  entry_price, sl_price, tp_price,
+                  blocked, block_reason, created_at
+           FROM signals ORDER BY created_at DESC LIMIT 100"""
     )
     if not rows:
-        return _page("Trade History", "<p>No closed trades yet.</p>")
+        return _page("Signals", "<p class='muted'>No signals recorded.</p>")
 
-    total = len(rows)
-    wins = sum(1 for r in rows if float(r["realized_pnl"] or 0) > 0)
-    net = sum(float(r["realized_pnl"] or 0) for r in rows)
-    gross_p = sum(float(r["realized_pnl"] or 0) for r in rows if float(r["realized_pnl"] or 0) > 0)
-    gross_l = abs(sum(float(r["realized_pnl"] or 0) for r in rows if float(r["realized_pnl"] or 0) < 0))
-    pf = gross_p / gross_l if gross_l > 0 else float("inf")
-    wr = wins / total * 100 if total else 0.0
-    net_cls = "ok" if net >= 0 else "danger"
-    pf_str = f"{pf:.2f}" if pf != float("inf") else "∞"
+    blocked_count = sum(1 for r in rows if r["blocked"])
+    fired_count = len(rows) - blocked_count
 
-    summary = f"""
-    <table style="margin-bottom:16px;width:auto">
-      <tr><th>Trades (last 100)</th><td>{total}</td></tr>
-      <tr><th>Win Rate</th><td>{wr:.1f}% ({wins}W / {total - wins}L)</td></tr>
-      <tr><th>Net PnL</th><td class="{net_cls}">{net:+.4f} USDT</td></tr>
-      <tr><th>Profit Factor</th><td>{pf_str}</td></tr>
-    </table>
-    """
+    summary = (
+        f"<p>Showing last {len(rows)} signals — "
+        f"<span class='ok'>{fired_count} fired</span> / "
+        f"<span class='muted'>{blocked_count} blocked</span></p>"
+    )
 
-    header = "<tr><th>Symbol</th><th>Side</th><th>Entry</th><th>Exit</th><th>PnL</th><th>Result</th><th>Reason</th><th>Duration</th><th>Closed</th></tr>"
+    header = (
+        "<tr><th>Symbol</th><th>Type</th><th>Strategy</th><th>Score</th>"
+        "<th>Entry</th><th>SL</th><th>TP</th>"
+        "<th>Status</th><th>Block Reason</th><th>Time</th></tr>"
+    )
     trs = []
     for r in rows:
-        pnl = float(r["realized_pnl"] or 0)
-        pnl_cls = "ok" if pnl > 0 else ("danger" if pnl < 0 else "")
-        result = "WIN" if pnl > 0 else ("LOSS" if pnl < 0 else "BE")
-        entry = float(r["entry_price"] or 0)
-        exit_p = float(r["exit_price"] or 0)
-        # Duration
-        duration = "-"
-        if r["opened_at"] and r["closed_at"]:
-            try:
-                from datetime import datetime, timezone
-                fmt = "%Y-%m-%dT%H:%M:%S.%f%z"
-                o = datetime.fromisoformat(r["opened_at"])
-                c = datetime.fromisoformat(r["closed_at"])
-                secs = int((c - o).total_seconds())
-                h, rem = divmod(secs, 3600)
-                m = rem // 60
-                duration = f"{h}h{m:02d}m" if h else f"{m}m"
-            except Exception:
-                pass
+        b = bool(r["blocked"])
+        type_cls = "muted" if b else ("ok" if r["signal_type"] == "long" else "warn")
+        status = '<span class="muted">blocked</span>' if b else '<span class="ok">fired</span>'
         trs.append(
             f"<tr>"
-            f"<td>{r['symbol']}</td>"
-            f"<td>{r['side'].upper()}</td>"
-            f"<td>{entry:.4f}</td>"
-            f"<td>{exit_p:.4f}</td>"
-            f"<td class='{pnl_cls}'>{pnl:+.4f}</td>"
-            f"<td class='{pnl_cls}'><b>{result}</b></td>"
-            f"<td>{r['close_reason'] or '-'}</td>"
-            f"<td>{duration}</td>"
-            f"<td>{(r['closed_at'] or '')[:19]}</td>"
+            f"<td><b>{r['symbol']}</b></td>"
+            f"<td class='{type_cls}'>{r['signal_type']}</td>"
+            f"<td>{r['strategy_name'] or '—'}</td>"
+            f"<td>{r['strength_score'] or '—'}</td>"
+            f"<td>{_krw(r['entry_price']) if r['entry_price'] else '—'}</td>"
+            f"<td>{_krw(r['sl_price']) if r['sl_price'] else '—'}</td>"
+            f"<td>{_krw(r['tp_price']) if r['tp_price'] else '—'}</td>"
+            f"<td>{status}</td>"
+            f"<td class='muted'>{r['block_reason'] or ''}</td>"
+            f"<td class='ts'>{(r['created_at'] or '')[:16]}</td>"
             f"</tr>"
         )
     body = summary + f"<table>{header}{''.join(trs)}</table>"
-    return _page("Trade History", body)
-
-
-@app.route("/liquidation")
-def liquidation():
-    rows = _q(
-        """SELECT symbol, side, entry_price, liquidation_price, quantity, leverage
-           FROM positions WHERE status='open' ORDER BY
-           ABS(CAST(liquidation_price AS REAL) - CAST(entry_price AS REAL)) /
-           CAST(entry_price AS REAL) ASC"""
-    )
-    if not rows:
-        return _page("Liquidation Risk", "<p>No open positions.</p>")
-
-    header = "<tr><th>Symbol</th><th>Side</th><th>Entry</th><th>Liq Price</th><th>Distance</th><th>Risk</th></tr>"
-    trs = []
-    for r in rows:
-        entry = float(r["entry_price"] or 0)
-        liq = float(r["liquidation_price"] or 0)
-        dist_pct = abs((liq - entry) / entry * 100) if entry else 0
-        if dist_pct < 3:
-            risk, cls = "CRITICAL", "danger"
-        elif dist_pct < 7:
-            risk, cls = "HIGH", "warn"
-        else:
-            risk, cls = "OK", "ok"
-        trs.append(
-            f"<tr><td>{r['symbol']}</td><td>{r['side'].upper()}</td>"
-            f"<td>{entry:.4f}</td><td>{liq:.4f}</td>"
-            f"<td class='{cls}'>{dist_pct:.2f}%</td>"
-            f"<td class='{cls}'><b>{risk}</b></td></tr>"
-        )
-    body = f"<table>{header}{''.join(trs)}</table>"
-    return _page("Liquidation Risk", body)
-
-
-@app.route("/safety")
-def safety():
-    sm = _q1("SELECT action, reason, created_at FROM safe_mode_events ORDER BY rowid DESC LIMIT 1")
-    shocks = _q(
-        """SELECT risk_level, risk_score, action_taken, created_at
-           FROM market_shock_events ORDER BY created_at DESC LIMIT 20"""
-    )
-
-    sm_is_active = sm and sm["action"] == "activated"
-    sm_status = "ACTIVE" if sm_is_active else "OFF"
-    sm_cls = "danger" if sm_is_active else "ok"
-    sm_reason = (sm["reason"] or "—") if sm_is_active else "—"
-    sm_since = (sm["created_at"] or "—") if (sm and sm_is_active) else "—"
-
-    sm_history = _q(
-        "SELECT action, reason, by, created_at FROM safe_mode_events ORDER BY rowid DESC LIMIT 10"
-    )
-
-    body = f"""
-    <h3>Safe Mode</h3>
-    <table>
-      <tr><th>Status</th><td class="{sm_cls}"><b>{sm_status}</b></td></tr>
-      <tr><th>Reason</th><td>{sm_reason}</td></tr>
-      <tr><th>Since</th><td>{sm_since}</td></tr>
-    </table>
-    <h3>Safe Mode History</h3>
-    """
-    if sm_history:
-        h_header = "<tr><th>Action</th><th>Reason</th><th>By</th><th>Time</th></tr>"
-        h_trs = []
-        for e in sm_history:
-            a_cls = "danger" if e["action"] == "activated" else "ok"
-            h_trs.append(
-                f"<tr><td class='{a_cls}'>{e['action']}</td>"
-                f"<td>{e['reason'] or '-'}</td><td>{e['by'] or '-'}</td>"
-                f"<td>{e['created_at']}</td></tr>"
-            )
-        body += f"<table>{h_header}{''.join(h_trs)}</table>"
-    else:
-        body += "<p>No safe mode events.</p>"
-
-    body += "<h3>Recent Market Shock Events</h3>"
-    if shocks:
-        header = "<tr><th>Level</th><th>Score</th><th>Action</th><th>Time</th></tr>"
-        trs = []
-        for s in shocks:
-            cls = "danger" if s["risk_level"] == "DANGER" else "warn"
-            trs.append(
-                f"<tr><td class='{cls}'>{s['risk_level']}</td>"
-                f"<td>{s['risk_score']}</td>"
-                f"<td>{s['action_taken'] or '-'}</td>"
-                f"<td>{s['created_at']}</td></tr>"
-            )
-        body += f"<table>{header}{''.join(trs)}</table>"
-    else:
-        body += "<p>No shock events recorded.</p>"
-
-    return _page("Safety Monitor", body)
+    return _page("Signals", body)
 
 
 @app.route("/orders")
 def orders():
     rows = _q(
-        """SELECT symbol, side, order_type, quantity, avg_fill_price, status,
-                  fee, trading_mode, created_at
-           FROM orders ORDER BY created_at DESC LIMIT 100"""
+        """SELECT symbol, side, order_type, quantity, price, avg_fill_price,
+                  status, broker_order_id, fee, trading_mode, updated_at
+           FROM orders ORDER BY updated_at DESC LIMIT 100"""
     )
     if not rows:
-        return _page("Order History", "<p>No orders.</p>")
+        return _page("Orders", "<p class='muted'>No orders.</p>")
 
-    header = "<tr><th>Symbol</th><th>Side</th><th>Type</th><th>Qty</th><th>Fill Price</th><th>Status</th><th>Fee</th><th>Mode</th><th>Time</th></tr>"
+    header = (
+        "<tr><th>Symbol</th><th>Side</th><th>Type</th><th>Qty</th>"
+        "<th>Price</th><th>Fill Price</th><th>Status</th>"
+        "<th>Fee</th><th>Mode</th><th>Time</th></tr>"
+    )
     trs = []
     for r in rows:
-        status_cls = "ok" if r["status"] == "filled" else ("warn" if r["status"] == "open" else "danger")
+        s = r["status"] or ""
+        s_cls = "ok" if s == "filled" else ("warn" if s in ("open", "partial") else "danger")
+        side_cls = "ok" if r["side"] == "buy" else "warn"
         trs.append(
-            f"<tr><td>{r['symbol']}</td><td>{r['side'].upper()}</td>"
-            f"<td>{r['order_type']}</td><td>{r['quantity']}</td>"
-            f"<td>{r['avg_fill_price'] or '-'}</td>"
-            f"<td class='{status_cls}'>{r['status']}</td>"
-            f"<td>{float(r['fee'] or 0):.4f}</td>"
-            f"<td>{r['trading_mode']}</td><td>{r['created_at']}</td></tr>"
+            f"<tr>"
+            f"<td><b>{r['symbol']}</b></td>"
+            f"<td class='{side_cls}'>{r['side'].upper()}</td>"
+            f"<td>{r['order_type']}</td>"
+            f"<td>{r['quantity']}</td>"
+            f"<td>{_krw(r['price']) if r['price'] else '—'}</td>"
+            f"<td>{_krw(r['avg_fill_price']) if r['avg_fill_price'] else '—'}</td>"
+            f"<td class='{s_cls}'>{s}</td>"
+            f"<td>{_krw(r['fee']) if r['fee'] and float(r['fee']) else '—'}</td>"
+            f"<td>{r['trading_mode'] or 'paper'}</td>"
+            f"<td class='ts'>{(r['updated_at'] or '')[:16]}</td>"
+            f"</tr>"
         )
     body = f"<table>{header}{''.join(trs)}</table>"
-    return _page("Order History", body)
+    return _page("Orders", body)
 
 
 @app.route("/performance")
 def performance():
-    today = date.today()
-    week_start = (today - timedelta(days=today.weekday())).isoformat()
+    today_kst = datetime.now(_KST).date()
+    week_start = (today_kst - timedelta(days=today_kst.weekday())).isoformat()
 
     week = _q1(
         """SELECT COUNT(*) AS t,
@@ -542,7 +339,7 @@ def performance():
         (week_start,),
     )
 
-    rows = _q(
+    daily_rows = _q(
         """SELECT DATE(closed_at) AS d,
                   COUNT(*) AS total,
                   SUM(CASE WHEN CAST(realized_pnl AS REAL) > 0 THEN 1 ELSE 0 END) AS wins,
@@ -557,60 +354,56 @@ def performance():
         """SELECT strategy_name,
                   COUNT(*) AS total,
                   SUM(CASE WHEN CAST(realized_pnl AS REAL) > 0 THEN 1 ELSE 0 END) AS wins,
-                  SUM(CASE WHEN CAST(realized_pnl AS REAL) > 0
-                            THEN CAST(realized_pnl AS REAL) ELSE 0 END) AS gross_p,
-                  ABS(SUM(CASE WHEN CAST(realized_pnl AS REAL) < 0
-                               THEN CAST(realized_pnl AS REAL) ELSE 0 END)) AS gross_l,
-                  SUM(CAST(realized_pnl AS REAL)) AS net,
-                  AVG(CAST(slippage_bps AS REAL)) AS avg_slip
+                  SUM(CASE WHEN CAST(realized_pnl AS REAL) > 0 THEN CAST(realized_pnl AS REAL) ELSE 0 END) AS gross_p,
+                  ABS(SUM(CASE WHEN CAST(realized_pnl AS REAL) < 0 THEN CAST(realized_pnl AS REAL) ELSE 0 END)) AS gross_l,
+                  SUM(CAST(realized_pnl AS REAL)) AS net
            FROM positions
            WHERE status='closed' AND realized_pnl IS NOT NULL AND realized_pnl != '0'
            GROUP BY strategy_name ORDER BY total DESC"""
     )
-    liq_count = _q1("SELECT COUNT(*) AS c FROM positions WHERE close_reason='liquidation'")
 
-    week_trades = week["t"] or 0 if week else 0
-    week_wins = week["w"] or 0 if week else 0
+    week_t = (week["t"] or 0) if week else 0
+    week_w = (week["w"] or 0) if week else 0
     week_net = float(week["net"] or 0) if week else 0.0
-    week_wr = (week_wins / week_trades * 100) if week_trades else 0.0
-    liqs = liq_count["c"] if liq_count else 0
-
+    week_wr = week_w / week_t * 100 if week_t else 0.0
     net_cls = "ok" if week_net >= 0 else "danger"
+
     body = f"""
     <h3>This Week ({week_start}~)</h3>
-    <table>
-      <tr><th>Trades</th><td>{week_trades} ({week_wins}W / {week_trades - week_wins}L)</td></tr>
+    <table style="width:auto">
+      <tr><th>Trades</th><td>{week_t} ({week_w}W / {week_t - week_w}L)</td></tr>
       <tr><th>Win Rate</th><td>{week_wr:.1f}%</td></tr>
-      <tr><th>Net PnL</th><td class="{net_cls}">{week_net:+.2f} USDT</td></tr>
-      <tr><th>Total Liquidations</th><td class="{"danger" if liqs>0 else "ok"}">{liqs}</td></tr>
+      <tr><th>Net PnL</th><td class="{net_cls}"><b>{_krw(week_net)}</b></td></tr>
     </table>
     <h3>Daily History (last 30 days)</h3>
     """
-    if rows:
+
+    if daily_rows:
         header = "<tr><th>Date</th><th>Trades</th><th>Win%</th><th>Net PnL</th><th>Profit Factor</th></tr>"
         trs = []
-        for r in rows:
-            total = r["total"] or 0
-            wins_d = r["wins"] or 0
-            wr = (wins_d / total * 100) if total else 0.0
+        for r in daily_rows:
+            t = r["total"] or 0
+            w = r["wins"] or 0
+            wr = w / t * 100 if t else 0.0
             net = float(r["net"] or 0)
-            gross_p = float(r["gross_p"] or 0)
-            gross_l = float(r["gross_l"] or 0)
-            pf = gross_p / gross_l if gross_l > 0 else float("inf")
-            pf_str = f"{pf:.2f}" if pf != float("inf") else "∞"
+            gp = float(r["gross_p"] or 0)
+            gl = float(r["gross_l"] or 0)
+            pf = gp / gl if gl > 0 else None
+            pf_str = f"{pf:.2f}" if pf is not None else "∞"
             cls = "ok" if net >= 0 else "danger"
             trs.append(
-                f"<tr><td>{r['d']}</td><td>{total} ({wins_d}W/{total - wins_d}L)</td>"
-                f"<td>{wr:.1f}%</td><td class='{cls}'>{net:+.2f}</td>"
+                f"<tr><td>{r['d']}</td><td>{t} ({w}W/{t-w}L)</td>"
+                f"<td>{wr:.1f}%</td><td class='{cls}'>{_krw(net)}</td>"
                 f"<td>{pf_str}</td></tr>"
             )
         body += f"<table>{header}{''.join(trs)}</table>"
+    else:
+        body += "<p class='muted'>No closed trades yet.</p>"
 
     body += "<h3>Strategy Breakdown (all-time)</h3>"
     if strat_rows:
-        _KELLY_MIN_TRADES = 6
-        s_header = ("<tr><th>Strategy</th><th>Trades</th><th>Win%</th>"
-                    "<th>Net PnL</th><th>PF</th><th>Avg Slip</th><th>Kelly</th></tr>")
+        _KELLY_MIN = 6
+        s_header = "<tr><th>Strategy</th><th>Trades</th><th>Win%</th><th>Net PnL</th><th>PF</th><th>Kelly</th></tr>"
         s_trs = []
         for r in strat_rows:
             t = r["total"] or 0
@@ -618,28 +411,24 @@ def performance():
             gp = float(r["gross_p"] or 0)
             gl = float(r["gross_l"] or 0)
             net = float(r["net"] or 0)
-            wr = (w / t * 100) if t else 0.0
-            pf = gp / gl if gl > 0 else float("inf")
-            pf_str = f"{pf:.2f}" if pf != float("inf") else "∞"
-            pf_cls = "ok" if pf >= 1.5 or pf == float("inf") else ("warn" if pf >= 1.0 else "danger")
+            wr = w / t * 100 if t else 0.0
+            pf = gp / gl if gl > 0 else None
+            pf_str = f"{pf:.2f}" if pf is not None else "∞"
+            pf_cls = "ok" if (pf is None or pf >= 1.5) else ("warn" if pf >= 1.0 else "danger")
             net_cls = "ok" if net >= 0 else "danger"
-            slip = r["avg_slip"]
-            slip_str = f"{float(slip):+.1f} bps" if slip is not None else "—"
-            kelly_str = (f'<span class="ok">ACTIVE ({t})</span>'
-                         if t >= _KELLY_MIN_TRADES
-                         else f'<span class="warn">warming {t}/{_KELLY_MIN_TRADES}</span>')
-            name = r["strategy_name"] or "unknown"
+            kelly = (f'<span class="ok">active ({t})</span>'
+                     if t >= _KELLY_MIN else
+                     f'<span class="warn">warming {t}/{_KELLY_MIN}</span>')
             s_trs.append(
-                f"<tr><td>{name}</td><td>{t}</td>"
-                f"<td>{wr:.1f}% ({w}W/{t-w}L)</td>"
-                f"<td class='{net_cls}'>{net:+.2f}</td>"
+                f"<tr><td>{r['strategy_name'] or 'unknown'}</td>"
+                f"<td>{t}</td><td>{wr:.1f}%</td>"
+                f"<td class='{net_cls}'>{_krw(net)}</td>"
                 f"<td class='{pf_cls}'>{pf_str}</td>"
-                f"<td>{slip_str}</td>"
-                f"<td>{kelly_str}</td></tr>"
+                f"<td>{kelly}</td></tr>"
             )
         body += f"<table>{s_header}{''.join(s_trs)}</table>"
     else:
-        body += "<p>No closed trades yet.</p>"
+        body += "<p class='muted'>No closed trades yet.</p>"
 
     return _page("Performance", body)
 
@@ -647,33 +436,43 @@ def performance():
 @app.route("/screener")
 def screener():
     rows = _q(
-        """SELECT symbol, base_asset, quote_asset, is_active, added_at, strategy
-           FROM symbols ORDER BY is_active DESC, symbol ASC"""
+        """SELECT s.symbol, s.is_active, s.market, s.sector, s.market_cap, s.strategy, s.added_at,
+                  (SELECT COUNT(*) FROM positions p WHERE p.symbol=s.symbol AND p.status='open') AS open_pos,
+                  (SELECT COUNT(*) FROM klines k WHERE k.symbol=s.symbol AND k.interval_type='1d') AS candles
+           FROM symbols s
+           ORDER BY s.is_active DESC, s.symbol ASC"""
     )
     if not rows:
-        return _page("Screener", "<p>No symbols in DB.</p>")
+        return _page("Screener", "<p class='muted'>No symbols in DB.</p>")
 
-    global_strategy = os.environ.get("ACTIVE_STRATEGY", "—")
-    header = ("<tr><th>Symbol</th><th>Base</th><th>Quote</th>"
-              "<th>Active</th><th>Strategy</th><th>Added</th></tr>")
+    active = sum(1 for r in rows if r["is_active"])
+    header = (
+        "<tr><th>Symbol</th><th>Market</th><th>Sector</th>"
+        "<th>시가총액</th><th>Strategy</th><th>Open</th>"
+        "<th>Candles(1d)</th><th>Active</th><th>Added</th></tr>"
+    )
     trs = []
     for r in rows:
-        active_cls = "ok" if r["is_active"] else ""
+        active_cls = "ok" if r["is_active"] else "muted"
         active_txt = "YES" if r["is_active"] else "no"
-        strategy = r["strategy"] or global_strategy
-        strat_cls = "warn" if r["strategy"] else ""  # highlight per-coin overrides
+        open_cls = "warn" if r["open_pos"] else ""
         trs.append(
-            f"<tr><td>{r['symbol']}</td>"
-            f"<td>{r['base_asset'] or '-'}</td>"
-            f"<td>{r['quote_asset'] or '-'}</td>"
+            f"<tr>"
+            f"<td class='{active_cls}'><b>{r['symbol']}</b></td>"
+            f"<td>{r['market'] or '—'}</td>"
+            f"<td>{r['sector'] or '—'}</td>"
+            f"<td>{r['market_cap'] or '—'}</td>"
+            f"<td>{r['strategy'] or '—'}</td>"
+            f"<td class='{open_cls}'>{r['open_pos'] or 0}</td>"
+            f"<td>{r['candles'] or 0}</td>"
             f"<td class='{active_cls}'>{active_txt}</td>"
-            f"<td class='{strat_cls}'>{strategy}</td>"
-            f"<td>{r['added_at'] or '-'}</td></tr>"
+            f"<td class='ts'>{(r['added_at'] or '')[:10]}</td>"
+            f"</tr>"
         )
-    body = (f"<p style='color:#aaa;font-size:0.85em'>Global strategy: "
-            f"<b style='color:#4af'>{global_strategy}</b> — "
-            f"per-coin overrides shown in <span class='warn'>yellow</span></p>"
-            f"<table>{header}{''.join(trs)}</table>")
+    body = (
+        f"<p><span class='ok'>{active} active</span> / {len(rows)} total symbols</p>"
+        f"<table>{header}{''.join(trs)}</table>"
+    )
     return _page("Screener", body)
 
 
@@ -685,45 +484,52 @@ def system():
     except OSError:
         pass
 
-    candle_freshness = _q(
-        """SELECT symbol, interval_type, MAX(open_time) AS latest
-           FROM klines GROUP BY symbol, interval_type ORDER BY symbol, latest DESC"""
+    candle_rows = _q(
+        """SELECT symbol, interval_type, COUNT(*) AS cnt, MAX(open_time) AS latest
+           FROM klines GROUP BY symbol, interval_type ORDER BY symbol, interval_type"""
     )
-    # One row per symbol: keep the freshest interval row
-    seen: set[str] = set()
-    deduped = []
-    for r in candle_freshness:
-        if r["symbol"] not in seen:
-            seen.add(r["symbol"])
-            deduped.append(r)
-    candle_freshness = deduped
 
     now_ms = datetime.now(timezone.utc).timestamp() * 1000
-    body = f"""
-    <h3>Database</h3>
-    <table>
-      <tr><th>Path</th><td>{_DB_PATH}</td></tr>
-      <tr><th>Size</th><td>{db_size_mb:.2f} MB</td></tr>
-    </table>
-    <h3>Candle Freshness</h3>
-    """
-    if candle_freshness:
-        header = "<tr><th>Symbol</th><th>Interval</th><th>Latest Candle</th><th>Age</th></tr>"
+    candle_table = ""
+    if candle_rows:
+        header = "<tr><th>Symbol</th><th>Interval</th><th>Count</th><th>Latest (ms)</th><th>Age</th></tr>"
         trs = []
-        for r in candle_freshness:
+        for r in candle_rows:
             latest_ms = int(r["latest"] or 0)
-            age_s = (now_ms - latest_ms) / 1000
-            age_cls = "ok" if age_s < 120 else ("warn" if age_s < 300 else "danger")
-            age_str = f"{age_s:.0f}s"
+            age_s = (now_ms - latest_ms) / 1000 if latest_ms else None
+            if age_s is None:
+                age_str, age_cls = "—", ""
+            elif age_s < 7200:  # <2h: fresh for daily candles
+                age_str, age_cls = f"{age_s/3600:.1f}h", "ok"
+            elif age_s < 90000:  # <25h: within one trading day
+                age_str, age_cls = f"{age_s/3600:.1f}h", "warn"
+            else:
+                age_str, age_cls = f"{age_s/3600:.0f}h", "danger"
             trs.append(
                 f"<tr><td>{r['symbol']}</td><td>{r['interval_type']}</td>"
-                f"<td>{latest_ms}</td>"
+                f"<td>{r['cnt']}</td><td class='ts'>{latest_ms}</td>"
                 f"<td class='{age_cls}'>{age_str}</td></tr>"
             )
-        body += f"<table>{header}{''.join(trs)}</table>"
+        candle_table = f"<table>{header}{''.join(trs)}</table>"
     else:
-        body += "<p>No candle data.</p>"
+        candle_table = "<p class='muted'>No candle data.</p>"
 
+    sig_count = _q1("SELECT COUNT(*) AS c FROM signals")
+    pos_count = _q1("SELECT COUNT(*) AS c FROM positions")
+    order_count = _q1("SELECT COUNT(*) AS c FROM orders")
+
+    body = f"""
+    <h3>Database</h3>
+    <table style="width:auto">
+      <tr><th>Path</th><td>{_DB_PATH}</td></tr>
+      <tr><th>Size</th><td>{db_size_mb:.2f} MB</td></tr>
+      <tr><th>Signals</th><td>{sig_count['c'] if sig_count else 0}</td></tr>
+      <tr><th>Positions</th><td>{pos_count['c'] if pos_count else 0}</td></tr>
+      <tr><th>Orders</th><td>{order_count['c'] if order_count else 0}</td></tr>
+    </table>
+    <h3>Candle Freshness</h3>
+    {candle_table}
+    """
     return _page("System", body)
 
 
@@ -737,8 +543,7 @@ def api_status():
     except Exception:
         db_ok = False
 
-    status = "ok" if db_ok else "degraded"
-    return jsonify({"status": status, "db": db_ok}), (200 if db_ok else 503)
+    return jsonify({"status": "ok" if db_ok else "degraded", "db": db_ok}), (200 if db_ok else 503)
 
 
 # ---------------------------------------------------------------------------
