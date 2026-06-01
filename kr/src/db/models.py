@@ -39,13 +39,10 @@ def init_db(db_path: str) -> None:
     conn = get_connection(db_path)
     for sql_file in sorted(_MIGRATIONS_DIR.glob("*.sql")):
         sql = sql_file.read_text(encoding="utf-8")
-        # Strip line comments, split on semicolons
-        statements = [s.strip() for s in re.split(r";", sql) if s.strip()]
+        # Strip line comments first, then split on semicolons
+        stripped = re.sub(r"--[^\n]*", "", sql)
+        statements = [s.strip() for s in stripped.split(";") if s.strip()]
         for stmt in statements:
-            # Skip comment-only blocks
-            clean = re.sub(r"--[^\n]*", "", stmt).strip()
-            if not clean:
-                continue
             try:
                 conn.executescript(stmt + ";")
             except sqlite3.OperationalError as exc:
