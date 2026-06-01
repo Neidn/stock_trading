@@ -1,14 +1,15 @@
-# KRX pre-market screener — 08:00 KST (23:00 UTC) weekdays Mon-Fri
+# KRX pre-market screener — 08:50 KST (23:50 UTC) weekdays Mon-Fri
+# Second run just before market open (09:00 KST) for final symbol selection.
 apiVersion: batch/v1
 kind: CronJob
 metadata:
-  name: screener
+  name: screener-late
   namespace: trading-stock-kr
   labels:
     app: screener
     app.kubernetes.io/part-of: kr-stock-autotrading
 spec:
-  schedule: "0 23 * * 1-5"
+  schedule: "50 23 * * 1-5"
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 3
   failedJobsHistoryLimit: 3

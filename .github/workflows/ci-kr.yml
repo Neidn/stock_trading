@@ -7,7 +7,6 @@ on:
     tags:
       - "v*"
     paths-ignore:
-      - "kr/k8s/**"
       - "**.md"
       - "guidance/**"
   pull_request:
@@ -205,3 +204,31 @@ jobs:
         run: |
           docker buildx imagetools inspect \
             ${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}
+
+  # ── Job 5: rolling restart deployments on k3s ────────────────────────────────
+  deploy:
+    runs-on: ubuntu-latest
+    needs: merge
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v4
+
+      - name: Write kubeconfig
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBE_CONFIG }}" > ~/.kube/config
+          chmod 600 ~/.kube/config
+
+      - name: Rolling restart deployments
+        run: |
+          kubectl rollout restart deployment/data-ingest deployment/signal-engine \
+            -n trading-stock-kr
+          kubectl rollout status deployment/data-ingest deployment/signal-engine \
+            -n trading-stock-kr --timeout=120s
+
+      - name: Apply updated k8s manifests
+        run: |
+          kubectl apply -f kr/k8s/cronjobs/screener.yaml
+          kubectl apply -f kr/k8s/cronjobs/screener-late.yaml
