@@ -34,6 +34,8 @@ spec:
                 name: trading-config-us
             - secretRef:
                 name: trading-secret
+            - secretRef:
+                name: telegram-secret
 
           livenessProbe:
             httpGet:

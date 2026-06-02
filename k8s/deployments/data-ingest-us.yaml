@@ -32,6 +32,8 @@ spec:
                 name: trading-config-us
             - secretRef:
                 name: trading-secret
+            - secretRef:
+                name: telegram-secret
 
           resources:
             requests:
