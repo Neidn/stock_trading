@@ -92,6 +92,25 @@ def _pos_currency_filter() -> str:
     return "AND currency='USD'" if _IS_US else "AND (currency='KRW' OR currency IS NULL)"
 
 
+def _sig_currency_filter() -> str:
+    """SQL fragment to filter signals by market currency."""
+    return "AND (currency='USD')" if _IS_US else "AND (currency='KRW' OR currency IS NULL)"
+
+
+def _ord_market_filter() -> str:
+    """SQL fragment to filter orders by market (via symbols.excd)."""
+    if _IS_US:
+        return "AND symbol IN (SELECT symbol FROM symbols WHERE excd IS NOT NULL AND excd != '')"
+    return "AND symbol NOT IN (SELECT symbol FROM symbols WHERE excd IS NOT NULL AND excd != '')"
+
+
+def _candle_market_filter() -> str:
+    """SQL fragment to filter klines by market (via symbols.excd)."""
+    if _IS_US:
+        return "WHERE symbol IN (SELECT symbol FROM symbols WHERE excd IS NOT NULL AND excd != '')"
+    return "WHERE symbol NOT IN (SELECT symbol FROM symbols WHERE excd IS NOT NULL AND excd != '')"
+
+
 # ---------------------------------------------------------------------------
 # HTML shell
 # ---------------------------------------------------------------------------
@@ -171,9 +190,10 @@ def index():
         (today_kst,),
     )
     open_count = _q1(f"SELECT COUNT(*) AS c FROM positions WHERE status='open' {cf}")
+    scf = _sig_currency_filter()
     recent_signals = _q(
-        """SELECT symbol, signal_type, strategy_name, strength_score, blocked, created_at
-           FROM signals ORDER BY created_at DESC LIMIT 8"""
+        f"""SELECT symbol, signal_type, strategy_name, strength_score, blocked, created_at
+            FROM signals WHERE 1=1 {scf} ORDER BY created_at DESC LIMIT 8"""
     )
 
     n_open = (open_count["c"] if open_count else 0) or 0
@@ -271,11 +291,12 @@ def positions():
 
 @app.route("/signals")
 def signals():
+    scf = _sig_currency_filter()
     rows = _q(
-        """SELECT symbol, signal_type, strategy_name, strength_score,
+        f"""SELECT symbol, signal_type, strategy_name, strength_score,
                   entry_price, sl_price, tp_price,
                   blocked, block_reason, created_at
-           FROM signals ORDER BY created_at DESC LIMIT 100"""
+           FROM signals WHERE 1=1 {scf} ORDER BY created_at DESC LIMIT 100"""
     )
     if not rows:
         return _page("Signals", "<p class='muted'>No signals recorded.</p>")
@@ -319,10 +340,11 @@ def signals():
 
 @app.route("/orders")
 def orders():
+    omf = _ord_market_filter()
     rows = _q(
-        """SELECT symbol, side, order_type, quantity, price, avg_fill_price,
+        f"""SELECT symbol, side, order_type, quantity, price, avg_fill_price,
                   status, broker_order_id, fee, trading_mode, updated_at
-           FROM orders ORDER BY updated_at DESC LIMIT 100"""
+           FROM orders WHERE 1=1 {omf} ORDER BY updated_at DESC LIMIT 100"""
     )
     if not rows:
         return _page("Orders", "<p class='muted'>No orders.</p>")
@@ -359,35 +381,36 @@ def orders():
 def performance():
     today_kst = datetime.now(_KST).date()
     week_start = (today_kst - timedelta(days=today_kst.weekday())).isoformat()
+    cf = _pos_currency_filter()
 
     week = _q1(
-        """SELECT COUNT(*) AS t,
+        f"""SELECT COUNT(*) AS t,
                   SUM(CASE WHEN CAST(realized_pnl AS REAL) > 0 THEN 1 ELSE 0 END) AS w,
                   SUM(CAST(realized_pnl AS REAL)) AS net
-           FROM positions WHERE status='closed' AND DATE(closed_at) >= ?""",
+           FROM positions WHERE status='closed' AND DATE(closed_at) >= ? {cf}""",
         (week_start,),
     )
 
     daily_rows = _q(
-        """SELECT DATE(closed_at) AS d,
+        f"""SELECT DATE(closed_at) AS d,
                   COUNT(*) AS total,
                   SUM(CASE WHEN CAST(realized_pnl AS REAL) > 0 THEN 1 ELSE 0 END) AS wins,
                   SUM(CAST(realized_pnl AS REAL)) AS net,
                   SUM(CASE WHEN CAST(realized_pnl AS REAL) > 0 THEN CAST(realized_pnl AS REAL) ELSE 0 END) AS gross_p,
                   ABS(SUM(CASE WHEN CAST(realized_pnl AS REAL) < 0 THEN CAST(realized_pnl AS REAL) ELSE 0 END)) AS gross_l
-           FROM positions WHERE status='closed'
+           FROM positions WHERE status='closed' {cf}
            GROUP BY DATE(closed_at) ORDER BY d DESC LIMIT 30"""
     )
 
     strat_rows = _q(
-        """SELECT strategy_name,
+        f"""SELECT strategy_name,
                   COUNT(*) AS total,
                   SUM(CASE WHEN CAST(realized_pnl AS REAL) > 0 THEN 1 ELSE 0 END) AS wins,
                   SUM(CASE WHEN CAST(realized_pnl AS REAL) > 0 THEN CAST(realized_pnl AS REAL) ELSE 0 END) AS gross_p,
                   ABS(SUM(CASE WHEN CAST(realized_pnl AS REAL) < 0 THEN CAST(realized_pnl AS REAL) ELSE 0 END)) AS gross_l,
                   SUM(CAST(realized_pnl AS REAL)) AS net
            FROM positions
-           WHERE status='closed' AND realized_pnl IS NOT NULL AND realized_pnl != '0'
+           WHERE status='closed' AND realized_pnl IS NOT NULL AND realized_pnl != '0' {cf}
            GROUP BY strategy_name ORDER BY total DESC"""
     )
 
@@ -541,9 +564,10 @@ def system():
     except OSError:
         pass
 
+    cmf = _candle_market_filter()
     candle_rows = _q(
-        """SELECT symbol, interval_type, COUNT(*) AS cnt, MAX(open_time) AS latest
-           FROM klines GROUP BY symbol, interval_type ORDER BY symbol, interval_type"""
+        f"""SELECT symbol, interval_type, COUNT(*) AS cnt, MAX(open_time) AS latest
+           FROM klines {cmf} GROUP BY symbol, interval_type ORDER BY symbol, interval_type"""
     )
 
     now_ms = datetime.now(timezone.utc).timestamp() * 1000
@@ -571,9 +595,12 @@ def system():
     else:
         candle_table = "<p class='muted'>No candle data.</p>"
 
-    sig_count = _q1("SELECT COUNT(*) AS c FROM signals")
-    pos_count = _q1("SELECT COUNT(*) AS c FROM positions")
-    order_count = _q1("SELECT COUNT(*) AS c FROM orders")
+    scf = _sig_currency_filter()
+    pcf = _pos_currency_filter()
+    omf = _ord_market_filter()
+    sig_count   = _q1(f"SELECT COUNT(*) AS c FROM signals WHERE 1=1 {scf}")
+    pos_count   = _q1(f"SELECT COUNT(*) AS c FROM positions WHERE 1=1 {pcf}")
+    order_count = _q1(f"SELECT COUNT(*) AS c FROM orders WHERE 1=1 {omf}")
 
     body = f"""
     <h3>Database</h3>
