@@ -35,6 +35,14 @@ def _get_symbols(conn) -> list[str]:
     return [r["symbol"] for r in rows] if rows else []
 
 
+def _get_kr_symbols(conn) -> list[str]:
+    """KIS WS H0STCNT0 is KRX-only — skip US symbols (excd IS NOT NULL)."""
+    rows = conn.execute(
+        "SELECT symbol FROM symbols WHERE is_active=1 AND (excd IS NULL OR excd='')"
+    ).fetchall()
+    return [r["symbol"] for r in rows] if rows else []
+
+
 async def _price_noop(symbol: str, price: int) -> None:
     """Placeholder price callback — SafetyMonitor reads last_prices directly."""
 
@@ -69,8 +77,8 @@ async def main() -> None:
             paper=(os.getenv("TRADING_MODE", "paper") != "live"),
             telegram_bot=telegram,
         ) as ws:
-            # Subscribe WS to all active symbols
-            for sym in _get_symbols(conn):
+            # Subscribe WS to KR symbols only (H0STCNT0 is KRX real-time, US symbols rejected)
+            for sym in _get_kr_symbols(conn):
                 await ws.subscribe(sym)
 
             safety_monitor = SafetyMonitor(
