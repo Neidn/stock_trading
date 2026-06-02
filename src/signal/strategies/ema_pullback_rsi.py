@@ -34,13 +34,13 @@ class EmaPullbackRsiStrategy(BaseStrategy):
         ema_mid (int):        Mid EMA period. Default 50.
         ema_slow (int):       Slow EMA period (macro trend filter). Default 200.
         rsi_period (int):     RSI lookback. Default 14.
-        rsi_low (float):      Lower bound of RSI neutral zone. Default 40.
+        rsi_low (float):      Lower bound of RSI neutral zone. Default 45.
         rsi_high (float):     Upper bound of RSI neutral zone. Default 60.
         adx_period (int):     ADX lookback. Default 14.
-        adx_threshold (float): Minimum ADX for trend confirmation. Default 20.
-        sl_atr_mult (float):  ATR multiplier for stop-loss. Default 1.5.
+        adx_threshold (float): Minimum ADX for trend confirmation. Default 30.
+        sl_atr_mult (float):  ATR multiplier for stop-loss. Default 2.0.
         tp1_atr_mult (float): ATR multiplier for TP1. Default 2.5.
-        tp2_atr_mult (float): ATR multiplier for TP2. Default 4.0.
+        tp2_atr_mult (float): ATR multiplier for TP2. Default 6.0.
     """
 
     DEFAULTS: dict = {
@@ -48,13 +48,13 @@ class EmaPullbackRsiStrategy(BaseStrategy):
         "ema_mid":       50,
         "ema_slow":      200,
         "rsi_period":    14,
-        "rsi_low":       40.0,
+        "rsi_low":       45.0,
         "rsi_high":      60.0,
         "adx_period":    14,
-        "adx_threshold": 20.0,
-        "sl_atr_mult":   1.5,
+        "adx_threshold": 30.0,
+        "sl_atr_mult":   2.0,
         "tp1_atr_mult":  2.5,
-        "tp2_atr_mult":  4.0,
+        "tp2_atr_mult":  6.0,
     }
 
     def get_name(self) -> str:
@@ -91,7 +91,7 @@ class EmaPullbackRsiStrategy(BaseStrategy):
         return int(p["ema_slow"]) + int(p["rsi_period"]) + 10
 
     def get_timeframe(self) -> str:
-        return "1d"
+        return "1h"
 
     def _validate_params(self) -> None:
         p = {**self.DEFAULTS, **self.params}
