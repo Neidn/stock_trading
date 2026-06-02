@@ -42,7 +42,7 @@ _PAPER_WS = "ws://ops.koreainvestment.com:31000"
 _LIVE_WS = "ws://ops.koreainvestment.com:21000"
 
 _WATCHDOG_INTERVAL = 5     # seconds between watchdog checks
-_SILENCE_TIMEOUT = 60      # seconds without message → reconnect
+_SILENCE_TIMEOUT = 300     # seconds without message → reconnect (60s too short for low-volume KRX stocks; heartbeat=30s handles real disconnections)
 _MAX_BACKOFF = 300          # max reconnect delay (seconds)
 
 _APPROVAL_PATH = "/oauth2/Approval"
@@ -200,7 +200,7 @@ class KISWSManager:
                 async with self._session.ws_connect(
                     self._ws_base,
                     heartbeat=30,
-                    receive_timeout=_SILENCE_TIMEOUT + 5,
+                    receive_timeout=_SILENCE_TIMEOUT + 30,
                 ) as ws:
                     connected_at = time.monotonic()
                     self._ws_connections[ticker] = ws

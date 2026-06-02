@@ -183,39 +183,57 @@ class SafetyMonitor:
 
         # TP1 — sell 50%
         if tp1 > 0 and price >= tp1 and position_id not in self._tp1_done:
-            half_qty = total_qty // 2
-            if half_qty > 0:
-                msg = f"🎯 TP1 도달: {symbol} 현재가={price:,} ≥ TP1={tp1:,.0f} → {half_qty}주 지정가 매도"
-                logger.info("tp1.hit symbol=%s price=%d tp1=%.0f qty=%d", symbol, price, tp1, half_qty)
-                self._notify_info(msg)
-                try:
-                    await self._om.create_order(symbol, "sell", half_qty, int(tp1))
-                    self._tp1_done.add(position_id)
-                    # Move SL to breakeven only when entry_price is known
-                    entry_price_str = pos.get("entry_price") or "0"
-                    if float(entry_price_str) > 0:
-                        self._move_sl_to_breakeven(position_id, entry_price_str)
-                    else:
-                        logger.warning(
-                            "tp1.breakeven_skip symbol=%s: entry_price=0, keeping initial SL",
-                            symbol,
-                        )
-                except Exception as exc:  # noqa: BLE001
-                    logger.error("tp1.sell_failed symbol=%s: %s", symbol, exc)
+            # Guard against duplicate orders across pod restarts: check DB first
+            existing_tp1 = self._conn.execute(
+                "SELECT 1 FROM orders WHERE symbol=? AND side='sell' AND price=? AND status='open' LIMIT 1",
+                (symbol, str(int(tp1))),
+            ).fetchone()
+            if existing_tp1:
+                logger.debug("tp1.already_placed symbol=%s tp1=%.0f — skipping", symbol, tp1)
+                self._tp1_done.add(position_id)
+            else:
+                half_qty = total_qty // 2
+                if half_qty > 0:
+                    msg = f"🎯 TP1 도달: {symbol} 현재가={price:,} ≥ TP1={tp1:,.0f} → {half_qty}주 지정가 매도"
+                    logger.info("tp1.hit symbol=%s price=%d tp1=%.0f qty=%d", symbol, price, tp1, half_qty)
+                    self._notify_info(msg)
+                    try:
+                        await self._om.create_order(symbol, "sell", half_qty, int(tp1))
+                        self._tp1_done.add(position_id)
+                        # Move SL to breakeven only when entry_price is known
+                        entry_price_str = pos.get("entry_price") or "0"
+                        if float(entry_price_str) > 0:
+                            self._move_sl_to_breakeven(position_id, entry_price_str)
+                        else:
+                            logger.warning(
+                                "tp1.breakeven_skip symbol=%s: entry_price=0, keeping initial SL",
+                                symbol,
+                            )
+                    except Exception as exc:  # noqa: BLE001
+                        logger.error("tp1.sell_failed symbol=%s: %s", symbol, exc)
 
         # TP2 — sell remaining qty
         if tp2 > 0 and price >= tp2 and position_id not in self._tp2_done:
-            remaining = (total_qty - total_qty // 2) if position_id in self._tp1_done else total_qty
-            if remaining > 0:
-                msg = f"🎯 TP2 도달: {symbol} 현재가={price:,} ≥ TP2={tp2:,.0f} → {remaining}주 지정가 매도"
-                logger.info("tp2.hit symbol=%s price=%d tp2=%.0f qty=%d", symbol, price, tp2, remaining)
-                self._notify_info(msg)
-                try:
-                    await self._om.create_order(symbol, "sell", remaining, int(tp2))
-                    self._tp2_done.add(position_id)
-                    self._mark_position_closed(pos, price, "tp2_hit")
-                except Exception as exc:  # noqa: BLE001
-                    logger.error("tp2.sell_failed symbol=%s: %s", symbol, exc)
+            # Guard against duplicate orders across pod restarts: check DB first
+            existing_tp2 = self._conn.execute(
+                "SELECT 1 FROM orders WHERE symbol=? AND side='sell' AND price=? AND status='open' LIMIT 1",
+                (symbol, str(int(tp2))),
+            ).fetchone()
+            if existing_tp2:
+                logger.debug("tp2.already_placed symbol=%s tp2=%.0f — skipping", symbol, tp2)
+                self._tp2_done.add(position_id)
+            else:
+                remaining = (total_qty - total_qty // 2) if position_id in self._tp1_done else total_qty
+                if remaining > 0:
+                    msg = f"🎯 TP2 도달: {symbol} 현재가={price:,} ≥ TP2={tp2:,.0f} → {remaining}주 지정가 매도"
+                    logger.info("tp2.hit symbol=%s price=%d tp2=%.0f qty=%d", symbol, price, tp2, remaining)
+                    self._notify_info(msg)
+                    try:
+                        await self._om.create_order(symbol, "sell", remaining, int(tp2))
+                        self._tp2_done.add(position_id)
+                        self._mark_position_closed(pos, price, "tp2_hit")
+                    except Exception as exc:  # noqa: BLE001
+                        logger.error("tp2.sell_failed symbol=%s: %s", symbol, exc)
 
     # ------------------------------------------------------------------
     # Force close at market end
