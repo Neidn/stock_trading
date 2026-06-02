@@ -399,7 +399,7 @@ class StrategyRunner:
             return False, ""
         try:
             from src.signal.signal_blocker import SignalBlocker  # noqa: PLC0415
-            blocker = SignalBlocker(self._conn, gap_detector=None, btc_adx=self._last_btc_adx)
+            blocker = SignalBlocker(self._conn, gap_detector=None, market_adx=self._last_btc_adx)
             return blocker.should_block(symbol)
         except (ImportError, AttributeError):
             return False, ""
