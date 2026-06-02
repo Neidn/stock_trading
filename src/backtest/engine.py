@@ -37,13 +37,15 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-from src.risk.liquidation_guard import get_dynamic_leverage
 from src.signal.base_strategy import BaseStrategy, SignalResult
 from src.signal.indicators import calc_atr
 
 logger = logging.getLogger(__name__)
 
-TAKER_FEE = 0.0004   # 0.04% Binance futures taker
+TAKER_FEE = 0.0004              # 0.04% Binance futures taker
+FUNDING_RATE = 0.0001           # 0.01%/8h typical BTC perp rate
+FUNDING_INTERVAL_MS = 8 * 3600 * 1000  # 8 hours in milliseconds
+MAINTENANCE_MARGIN_RATE = 0.005  # 0.5% Binance BTC-USDT bracket 1
 DATA_DIR = Path(__file__).parent.parent.parent / "data" / "backtest"
 
 _ALL_STRATEGIES = [
@@ -73,12 +75,13 @@ class Trade:
     realized_pnl: float
     entry_fee: float
     exit_fee: float
-    close_reason: str      # 'sl' | 'tp1' | 'reversal' | 'end_of_data'
+    close_reason: str      # 'sl' | 'tp1' | 'reversal' | 'end_of_data' | 'liquidated'
     entry_bar: int
     exit_bar: int
     bars_held: int
     entry_ts: int = 0
     exit_ts: int = 0
+    funding_fee: float = 0.0
 
 
 @dataclass
@@ -90,6 +93,7 @@ class BacktestResult:
     end_ts: int
     initial_balance: float
     final_balance: float
+    leverage: int = 1
     trades: list[Trade] = field(default_factory=list)
 
     @property
@@ -168,6 +172,14 @@ class BacktestResult:
     def return_pct(self) -> float:
         return (self.final_balance - self.initial_balance) / self.initial_balance * 100
 
+    @property
+    def total_liquidations(self) -> int:
+        return sum(1 for t in self.trades if t.close_reason == "liquidated")
+
+    @property
+    def total_funding_paid(self) -> float:
+        return sum(t.funding_fee for t in self.trades)
+
 
 # ---------------------------------------------------------------------------
 # Engine
@@ -191,12 +203,14 @@ class BacktestEngine:
         initial_balance: float = 100.0,
         risk_pct: float = 0.01,
         taker_fee: float = TAKER_FEE,
+        leverage: int = 1,
     ) -> None:
         self._strategy = strategy
         self._symbol = symbol
         self._initial_balance = initial_balance
         self._risk_pct = risk_pct
         self._taker_fee = taker_fee
+        self._leverage = max(1, int(leverage))
 
     # ------------------------------------------------------------------
     # Data fetching
@@ -262,8 +276,20 @@ class BacktestEngine:
 
         for i in range(min_candles, n):
             candle = df.iloc[i]
+            candle_ts = int(candle["timestamp"])
 
-            # --- 1. Check SL/TP on current candle ---
+            # --- 0. Apply funding fee for leveraged positions ---
+            if open_pos is not None and self._leverage > 1:
+                last_fund_ts = open_pos["last_funding_ts"]
+                while candle_ts - last_fund_ts >= FUNDING_INTERVAL_MS:
+                    notional = open_pos["qty"] * open_pos["entry_price"]
+                    fee = notional * FUNDING_RATE
+                    open_pos["accumulated_funding"] += fee
+                    balance -= fee
+                    last_fund_ts += FUNDING_INTERVAL_MS
+                open_pos["last_funding_ts"] = last_fund_ts
+
+            # --- 1. Check SL/TP/liquidation on current candle ---
             if open_pos is not None:
                 exit_info = self._check_sl_tp(candle, open_pos)
                 if exit_info:
@@ -342,6 +368,16 @@ class BacktestEngine:
                     sl = entry_price + sl_dist
                     tp1 = entry_price - tp1_dist
 
+                # Liquidation price (isolated margin model)
+                mmr = MAINTENANCE_MARGIN_RATE
+                if self._leverage > 1:
+                    if new_side == "long":
+                        liq_price = entry_price * (1 - (1 - mmr) / self._leverage)
+                    else:
+                        liq_price = entry_price * (1 + (1 - mmr) / self._leverage)
+                else:
+                    liq_price = 0.0
+
                 open_pos = {
                     "side": new_side,
                     "entry_price": entry_price,
@@ -351,6 +387,9 @@ class BacktestEngine:
                     "entry_fee": entry_fee,
                     "entry_bar": i + 1,
                     "entry_ts": entry_ts,
+                    "liq_price": liq_price,
+                    "accumulated_funding": 0.0,
+                    "last_funding_ts": entry_ts,
                 }
 
         # --- 5. Close any remaining position at end of data ---
@@ -372,6 +411,7 @@ class BacktestEngine:
             end_ts=int(df.iloc[-1]["timestamp"]),
             initial_balance=self._initial_balance,
             final_balance=balance,
+            leverage=self._leverage,
             trades=trades,
         )
 
@@ -383,8 +423,15 @@ class BacktestEngine:
         side = pos["side"]
         sl = pos["sl"]
         tp1 = pos["tp1"]
+        liq = pos.get("liq_price", 0.0)
         high = float(candle["high"])
         low = float(candle["low"])
+
+        # Liquidation checked first — worse than SL for account
+        if liq > 0:
+            liq_hit = (side == "long" and low <= liq) or (side == "short" and high >= liq)
+            if liq_hit:
+                return {"price": liq, "reason": "liquidated"}
 
         sl_hit = (side == "long" and low <= sl) or (side == "short" and high >= sl)
         tp_hit = (side == "long" and high >= tp1) or (side == "short" and low <= tp1)
@@ -416,7 +463,8 @@ class BacktestEngine:
             pnl_raw = (entry_price - exit_price) * qty
 
         exit_fee = qty * exit_price * self._taker_fee
-        realized_pnl = pnl_raw - entry_fee - exit_fee
+        funding_fee = pos.get("accumulated_funding", 0.0)
+        realized_pnl = pnl_raw - entry_fee - exit_fee - funding_fee
         bars_held = max(0, exit_bar - pos["entry_bar"])
 
         return Trade(
@@ -434,6 +482,7 @@ class BacktestEngine:
             bars_held=bars_held,
             entry_ts=pos.get("entry_ts", 0),
             exit_ts=exit_ts,
+            funding_fee=funding_fee,
         )
 
 
@@ -450,9 +499,10 @@ def print_report(result: BacktestResult) -> None:
     pf_str = f"{pf:.2f}" if pf != float("inf") else "∞"
     start = _ts_to_str(result.start_ts)
     end = _ts_to_str(result.end_ts)
+    lev_str = f"{result.leverage}x" if result.leverage > 1 else "spot"
 
     print(f"\n{'='*52}")
-    print(f"  Backtest: {result.strategy} | {result.symbol}")
+    print(f"  Backtest: {result.strategy} | {result.symbol} | {lev_str}")
     print(f"  Period:   {start} → {end}  ({result.timeframe})")
     print(f"{'='*52}")
     print(f"  Trades:          {result.total_trades}")
@@ -472,6 +522,9 @@ def print_report(result: BacktestResult) -> None:
     print(f"  Avg bars held:   {result.avg_bars_held:.1f}")
     print(f"  Balance:         {result.initial_balance:.2f} → {result.final_balance:.4f} USDT")
     print(f"  Exit reasons:    {result.close_reason_counts}")
+    if result.leverage > 1:
+        print(f"  Liquidations:    {result.total_liquidations}")
+        print(f"  Funding paid:    {result.total_funding_paid:.4f} USDT")
     print(f"{'='*52}\n")
 
 
@@ -497,7 +550,7 @@ def save_trades_csv(result: BacktestResult, path: str) -> None:
         writer.writerow([
             "strategy", "symbol", "side", "entry_ts", "exit_ts",
             "entry_price", "exit_price", "qty",
-            "entry_fee", "exit_fee", "realized_pnl", "close_reason", "bars_held",
+            "entry_fee", "exit_fee", "funding_fee", "realized_pnl", "close_reason", "bars_held",
         ])
         for t in result.trades:
             writer.writerow([
@@ -506,7 +559,7 @@ def save_trades_csv(result: BacktestResult, path: str) -> None:
                 _ts_to_str(t.exit_ts) if t.exit_ts else "",
                 f"{t.entry_price:.6f}", f"{t.exit_price:.6f}",
                 f"{t.qty:.6f}", f"{t.entry_fee:.6f}", f"{t.exit_fee:.6f}",
-                f"{t.realized_pnl:.6f}", t.close_reason, t.bars_held,
+                f"{t.funding_fee:.6f}", f"{t.realized_pnl:.6f}", t.close_reason, t.bars_held,
             ])
     print(f"Trades saved to {path}")
 
@@ -585,6 +638,9 @@ def main() -> None:
                         help="Run ALL strategies and print comparison table")
     parser.add_argument("--no-cache", action="store_true",
                         help="Ignore local OHLCV cache, re-fetch from Binance")
+    parser.add_argument("--leverage", type=int, default=1,
+                        help="Leverage multiplier (default 1 = spot/no leverage). "
+                             "Enables liquidation price + funding fee simulation.")
     args = parser.parse_args()
 
     import ccxt
@@ -607,6 +663,7 @@ def main() -> None:
                 symbol=args.symbol,
                 initial_balance=args.balance,
                 risk_pct=args.risk_pct,
+                leverage=args.leverage,
             )
             timeframe = strategy.get_timeframe()
             try:
@@ -635,6 +692,7 @@ def main() -> None:
         symbol=args.symbol,
         initial_balance=args.balance,
         risk_pct=args.risk_pct,
+        leverage=args.leverage,
     )
     timeframe = strategy.get_timeframe()
     df = engine.fetch_ohlcv(exchange, timeframe, since_ms, until_ms,
