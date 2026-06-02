@@ -43,6 +43,7 @@ _DEFAULT_POD_URLS: dict[str, str] = {
 }
 
 FORCE_CLOSE_BUFFER_MIN: int = 10   # force-close N minutes before market end (15:20 KST)
+FILL_POLL_INTERVAL_SEC: int = 30   # how often to sync open sell orders with KIS fill status
 
 
 class SafetyMonitor:
@@ -90,24 +91,30 @@ class SafetyMonitor:
     async def run_forever(self) -> None:
         """Main watchdog loop — never exits except on CancelledError."""
         logger.info("safety_monitor.start interval=%ds", self._interval)
-        while True:
-            try:
-                if is_closing_soon(buffer_min=FORCE_CLOSE_BUFFER_MIN):
-                    await self._force_close_all()
-                else:
-                    self._force_closed = False  # reset for next trading day
-                    await self._check_all_positions()
+        poll_task = asyncio.create_task(self._poll_fills_loop(), name="order_fill_poller")
+        try:
+            while True:
+                try:
+                    if is_closing_soon(buffer_min=FORCE_CLOSE_BUFFER_MIN):
+                        await self._force_close_all()
+                    else:
+                        self._force_closed = False  # reset for next trading day
+                        await self._check_all_positions()
 
-                await self._check_pod_health()
-                await asyncio.sleep(self._interval)
-            except asyncio.CancelledError:
-                logger.info("safety_monitor.cancelled")
-                raise
-            except Exception as exc:  # noqa: BLE001
-                msg = f"Safety Monitor 에러: {html.escape(str(exc))}"
-                logger.error(msg, exc_info=True)
-                self._notify_critical(msg)
-                await asyncio.sleep(5.0)
+                    await self._check_pod_health()
+                    await asyncio.sleep(self._interval)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    msg = f"Safety Monitor 에러: {html.escape(str(exc))}"
+                    logger.error(msg, exc_info=True)
+                    self._notify_critical(msg)
+                    await asyncio.sleep(5.0)
+        except asyncio.CancelledError:
+            logger.info("safety_monitor.cancelled")
+            poll_task.cancel()
+            await asyncio.gather(poll_task, return_exceptions=True)
+            raise
 
     # ------------------------------------------------------------------
     # Position checks
@@ -234,6 +241,130 @@ class SafetyMonitor:
                         self._mark_position_closed(pos, price, "tp2_hit")
                     except Exception as exc:  # noqa: BLE001
                         logger.error("tp2.sell_failed symbol=%s: %s", symbol, exc)
+
+    # ------------------------------------------------------------------
+    # Order fill polling — sync DB with KIS actual fills
+    # ------------------------------------------------------------------
+
+    async def _poll_fills_loop(self) -> None:
+        """Background loop: detect TP1/TP2 limit sell fills by diffing KIS unfilled list."""
+        while True:
+            try:
+                await asyncio.sleep(FILL_POLL_INTERVAL_SEC)
+                await self._sync_order_fills()
+            except asyncio.CancelledError:
+                return
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("order_poll.error: %s", exc)
+
+    async def _sync_order_fills(self) -> None:
+        """Compare open limit sell orders in DB against KIS unfilled orders.
+
+        An order that was open on KIS but has since disappeared from the unfilled
+        list was either filled or cancelled.  In normal operation (no manual
+        cancellations) this means it was filled — update DB accordingly.
+        """
+        if self._kis is None:
+            return
+
+        rows = self._conn.execute(
+            """SELECT order_id, broker_order_id, symbol, price, quantity
+               FROM orders
+               WHERE side='sell' AND order_type='limit' AND status='open'
+               AND broker_order_id IS NOT NULL AND broker_order_id != ''"""
+        ).fetchall()
+        if not rows:
+            return
+
+        try:
+            unfilled = await self._kis.fetch_unfilled_orders()
+            unfilled_ids = {o["order_no"] for o in unfilled}
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("order_poll.fetch_unfilled_failed: %s", exc)
+            return
+
+        now = datetime.now(timezone.utc).isoformat()
+        for row in rows:
+            r = dict(row) if hasattr(row, "keys") else _row_to_dict(row)
+            broker_id = r.get("broker_order_id", "")
+            if not broker_id or broker_id in unfilled_ids:
+                continue  # still pending — nothing to do
+
+            symbol   = r.get("symbol", "")
+            price_str = r.get("price") or "0"
+            qty      = int(float(r.get("quantity") or "0"))
+
+            logger.info(
+                "order_poll.filled symbol=%s broker_id=%s price=%s qty=%d",
+                symbol, broker_id, price_str, qty,
+            )
+            self._conn.execute(
+                """UPDATE orders SET status='filled', filled_qty=?, avg_fill_price=?, updated_at=?
+                   WHERE broker_order_id=? AND status='open'""",
+                (str(qty), price_str, now, broker_id),
+            )
+            self._conn.commit()
+            await self._on_sell_filled(symbol, price_str, qty)
+
+    async def _on_sell_filled(self, symbol: str, fill_price_str: str, qty: int) -> None:
+        """Handle position bookkeeping after a sell limit order fills."""
+        try:
+            fill_price = float(fill_price_str or "0")
+        except ValueError:
+            fill_price = 0.0
+
+        pos_row = self._conn.execute(
+            "SELECT * FROM positions WHERE symbol=? AND status='open' LIMIT 1",
+            (symbol,),
+        ).fetchone()
+        if not pos_row:
+            return
+
+        pos = _row_to_dict(pos_row)
+        position_id = pos.get("position_id", "")
+
+        try:
+            tp1      = float(pos.get("take_profit_1") or "0")
+            tp2      = float(pos.get("take_profit_2") or "0")
+            entry    = float(pos.get("entry_price") or "0")
+            total_qty = int(float(pos.get("quantity") or "0"))
+        except (TypeError, ValueError):
+            return
+
+        pnl = (fill_price - entry) * qty if entry > 0 else 0.0
+        now = datetime.now(timezone.utc).isoformat()
+
+        is_tp2 = tp2 > 0 and fill_price >= tp2 * 0.99
+        is_tp1 = tp1 > 0 and fill_price >= tp1 * 0.99
+
+        if is_tp2:
+            self._conn.execute(
+                """UPDATE positions SET status='closed', close_reason='tp2_hit',
+                   closed_at=?, exit_price=?, realized_pnl=?
+                   WHERE position_id=? AND status='open'""",
+                (now, fill_price_str, str(pnl), position_id),
+            )
+            self._conn.commit()
+            self._tp2_done.add(position_id)
+            logger.info("order_poll.tp2_closed symbol=%s fill=%.0f pnl=%.0f", symbol, fill_price, pnl)
+            self._notify_info(
+                f"✅ TP2 체결 완료: {symbol} @ {fill_price:,.0f}원 | PnL={pnl:+,.0f}원"
+            )
+        elif is_tp1:
+            new_qty = max(0, total_qty - qty)
+            self._conn.execute(
+                "UPDATE positions SET quantity=?, realized_pnl=? WHERE position_id=? AND status='open'",
+                (str(new_qty), str(pnl), position_id),
+            )
+            self._conn.commit()
+            self._tp1_done.add(position_id)
+            logger.info(
+                "order_poll.tp1_partial symbol=%s sold=%d remaining=%d pnl=%.0f",
+                symbol, qty, new_qty, pnl,
+            )
+            self._notify_info(
+                f"🎯 TP1 체결 완료: {symbol} @ {fill_price:,.0f}원 | 잔량={new_qty}주 | PnL={pnl:+,.0f}원"
+            )
 
     # ------------------------------------------------------------------
     # Force close at market end
