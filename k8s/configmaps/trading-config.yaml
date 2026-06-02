@@ -44,5 +44,7 @@ data:
   ALLOW_OVERNIGHT: "false"
   FORCE_CLOSE_TIME: "15:20"
 
+  FALLBACK_BALANCE_KRW: "10000000"  # used in paper mode (VTS doesn't support balance API)
+
   SQLITE_DB_PATH: "/data/trading.db"
   LOG_LEVEL: "INFO"
