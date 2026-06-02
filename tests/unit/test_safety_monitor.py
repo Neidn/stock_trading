@@ -203,7 +203,20 @@ class TestCheckTp(unittest.IsolatedAsyncioTestCase):
         await mon._check_tp(pos, price=87000)
         om.create_order.assert_called_once_with("005930", "sell", 5, 86000)
 
-    async def test_tp1_hit_moves_sl_to_breakeven(self):
+    async def test_tp1_hit_moves_sl_to_breakeven_when_tp2_set(self):
+        # With TP2 set → partial close (50%), SL moves to breakeven
+        conn = _make_conn()
+        pid = _insert_position(conn, entry_price=80000, quantity=10,
+                               stop_loss=78000, take_profit_1=86000, take_profit_2=92000)
+        om = _make_om()
+        mon = _make_monitor(conn=conn, om=om)
+        pos = dict(conn.execute("SELECT * FROM positions WHERE position_id=?", (pid,)).fetchone())
+        await mon._check_tp(pos, price=87000)
+        row = conn.execute("SELECT stop_loss FROM positions WHERE position_id=?", (pid,)).fetchone()
+        self.assertEqual(str(row["stop_loss"]), "80000")
+
+    async def test_tp1_no_tp2_full_close(self):
+        # No TP2 → sell full qty at TP1 and mark position closed
         conn = _make_conn()
         pid = _insert_position(conn, entry_price=80000, quantity=10,
                                stop_loss=78000, take_profit_1=86000)
@@ -211,8 +224,10 @@ class TestCheckTp(unittest.IsolatedAsyncioTestCase):
         mon = _make_monitor(conn=conn, om=om)
         pos = dict(conn.execute("SELECT * FROM positions WHERE position_id=?", (pid,)).fetchone())
         await mon._check_tp(pos, price=87000)
-        row = conn.execute("SELECT stop_loss FROM positions WHERE position_id=?", (pid,)).fetchone()
-        self.assertEqual(str(row["stop_loss"]), "80000")
+        om.create_order.assert_called_once_with("005930", "sell", 10, 86000)
+        row = conn.execute("SELECT status, close_reason FROM positions WHERE position_id=?", (pid,)).fetchone()
+        self.assertEqual(row["status"], "closed")
+        self.assertEqual(row["close_reason"], "tp1_hit")
 
     async def test_tp1_not_hit_no_order(self):
         conn = _make_conn()

@@ -39,8 +39,7 @@ class EmaPullbackRsiStrategy(BaseStrategy):
         adx_period (int):     ADX lookback. Default 14.
         adx_threshold (float): Minimum ADX for trend confirmation. Default 30.
         sl_atr_mult (float):  ATR multiplier for stop-loss. Default 2.0.
-        tp1_atr_mult (float): ATR multiplier for TP1. Default 2.5.
-        tp2_atr_mult (float): ATR multiplier for TP2. Default 6.0.
+        tp1_atr_mult (float): ATR multiplier for TP1 (full close). Default 2.5.
     """
 
     DEFAULTS: dict = {
@@ -54,7 +53,6 @@ class EmaPullbackRsiStrategy(BaseStrategy):
         "adx_threshold": 30.0,
         "sl_atr_mult":   2.0,
         "tp1_atr_mult":  2.5,
-        "tp2_atr_mult":  6.0,
     }
 
     def get_name(self) -> str:
@@ -194,7 +192,6 @@ class EmaPullbackRsiStrategy(BaseStrategy):
                 entry_price=entry,
                 sl=sl,
                 tp1=entry + cur_atr * tp1_atr_mult,
-                tp2=entry + cur_atr * tp2_atr_mult,
                 indicators=indicators_snapshot,
                 reason=(
                     f"롱: EMA정렬상승 + RSI={cur_rsi:.1f}∈[{rsi_low},{rsi_high}] + 양봉 | "
@@ -211,7 +208,6 @@ class EmaPullbackRsiStrategy(BaseStrategy):
                 entry_price=entry,
                 sl=sl,
                 tp1=entry - cur_atr * tp1_atr_mult,
-                tp2=entry - cur_atr * tp2_atr_mult,
                 indicators=indicators_snapshot,
                 reason=(
                     f"숏: EMA정렬하락 + RSI={cur_rsi:.1f}∈[{rsi_low},{rsi_high}] + 음봉 | "

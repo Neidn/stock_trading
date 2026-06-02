@@ -188,7 +188,7 @@ class SafetyMonitor:
 
         total_qty = self._current_qty(pos)
 
-        # TP1 — sell 50%
+        # TP1 — sell full qty if no TP2, else sell 50% and trail SL to breakeven
         if tp1 > 0 and price >= tp1 and position_id not in self._tp1_done:
             # Guard against duplicate orders across pod restarts: check DB first
             existing_tp1 = self._conn.execute(
@@ -199,23 +199,29 @@ class SafetyMonitor:
                 logger.debug("tp1.already_placed symbol=%s tp1=%.0f — skipping", symbol, tp1)
                 self._tp1_done.add(position_id)
             else:
-                half_qty = total_qty // 2
-                if half_qty > 0:
-                    msg = f"🎯 TP1 도달: {symbol} 현재가={price:,} ≥ TP1={tp1:,.0f} → {half_qty}주 지정가 매도"
-                    logger.info("tp1.hit symbol=%s price=%d tp1=%.0f qty=%d", symbol, price, tp1, half_qty)
+                sell_qty = total_qty if tp2 <= 0 else total_qty // 2
+                if sell_qty > 0:
+                    close_type = "전량" if tp2 <= 0 else "50%"
+                    msg = f"🎯 TP1 도달: {symbol} 현재가={price:,} ≥ TP1={tp1:,.0f} → {sell_qty}주({close_type}) 지정가 매도"
+                    logger.info("tp1.hit symbol=%s price=%d tp1=%.0f qty=%d full=%s",
+                                symbol, price, tp1, sell_qty, tp2 <= 0)
                     self._notify_info(msg)
                     try:
-                        await self._om.create_order(symbol, "sell", half_qty, int(tp1))
+                        await self._om.create_order(symbol, "sell", sell_qty, int(tp1))
                         self._tp1_done.add(position_id)
-                        # Move SL to breakeven only when entry_price is known
-                        entry_price_str = pos.get("entry_price") or "0"
-                        if float(entry_price_str) > 0:
-                            self._move_sl_to_breakeven(position_id, entry_price_str)
+                        if tp2 <= 0:
+                            # Full close — mark position done
+                            self._mark_position_closed(pos, price, "tp1_hit")
                         else:
-                            logger.warning(
-                                "tp1.breakeven_skip symbol=%s: entry_price=0, keeping initial SL",
-                                symbol,
-                            )
+                            # Partial close — move SL to breakeven
+                            entry_price_str = pos.get("entry_price") or "0"
+                            if float(entry_price_str) > 0:
+                                self._move_sl_to_breakeven(position_id, entry_price_str)
+                            else:
+                                logger.warning(
+                                    "tp1.breakeven_skip symbol=%s: entry_price=0, keeping initial SL",
+                                    symbol,
+                                )
                     except Exception as exc:  # noqa: BLE001
                         logger.error("tp1.sell_failed symbol=%s: %s", symbol, exc)
 
