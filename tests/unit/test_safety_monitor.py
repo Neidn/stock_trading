@@ -51,12 +51,16 @@ CREATE TABLE IF NOT EXISTS safe_mode_events (
 );
 CREATE TABLE IF NOT EXISTS orders (
     order_id        TEXT PRIMARY KEY,
+    broker_order_id TEXT DEFAULT '',
     symbol          TEXT NOT NULL,
     side            TEXT NOT NULL,
     order_type      TEXT NOT NULL,
     price           TEXT,
     quantity        TEXT NOT NULL,
     status          TEXT NOT NULL,
+    filled_qty      TEXT DEFAULT '0',
+    avg_fill_price  TEXT,
+    updated_at      TEXT,
     created_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
 """

@@ -263,15 +263,17 @@ class SafetyMonitor:
         An order that was open on KIS but has since disappeared from the unfilled
         list was either filled or cancelled.  In normal operation (no manual
         cancellations) this means it was filled — update DB accordingly.
+
+        For orders with empty broker_order_id (placed before reliable odno tracking),
+        fall back to matching by symbol+price against the KIS unfilled list.
         """
         if self._kis is None:
             return
 
         rows = self._conn.execute(
-            """SELECT order_id, broker_order_id, symbol, price, quantity
+            """SELECT order_id, broker_order_id, symbol, price, quantity, created_at
                FROM orders
-               WHERE side='sell' AND order_type='limit' AND status='open'
-               AND broker_order_id IS NOT NULL AND broker_order_id != ''"""
+               WHERE side='sell' AND order_type='limit' AND status='open'"""
         ).fetchall()
         if not rows:
             return
@@ -279,29 +281,64 @@ class SafetyMonitor:
         try:
             unfilled = await self._kis.fetch_unfilled_orders()
             unfilled_ids = {o["order_no"] for o in unfilled}
+            # Fallback index: (symbol, price_str) → order_no for orders missing broker_order_id
+            unfilled_by_sym_price: dict[tuple[str, str], str] = {
+                (o["symbol"], o["price"]): o["order_no"] for o in unfilled if o.get("order_no")
+            }
         except Exception as exc:  # noqa: BLE001
             logger.debug("order_poll.fetch_unfilled_failed: %s", exc)
             return
 
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(timezone.utc)
+        now_iso = now.isoformat()
         for row in rows:
             r = dict(row) if hasattr(row, "keys") else _row_to_dict(row)
-            broker_id = r.get("broker_order_id", "")
-            if not broker_id or broker_id in unfilled_ids:
-                continue  # still pending — nothing to do
-
-            symbol   = r.get("symbol", "")
+            broker_id = r.get("broker_order_id") or ""
+            order_id  = r.get("order_id", "")
+            symbol    = r.get("symbol", "")
             price_str = r.get("price") or "0"
-            qty      = int(float(r.get("quantity") or "0"))
+            qty       = int(float(r.get("quantity") or "0"))
+
+            if broker_id:
+                # Normal path: match by KIS order number
+                if broker_id in unfilled_ids:
+                    continue  # still pending
+            else:
+                # Fallback: match by symbol + price
+                key = (symbol, price_str)
+                matched_broker_id = unfilled_by_sym_price.get(key)
+                if matched_broker_id:
+                    # Still pending — backfill broker_order_id for future polls
+                    self._conn.execute(
+                        "UPDATE orders SET broker_order_id=? WHERE order_id=?",
+                        (matched_broker_id, order_id),
+                    )
+                    self._conn.commit()
+                    logger.info(
+                        "order_poll.backfilled broker_id=%s symbol=%s price=%s",
+                        matched_broker_id, symbol, price_str,
+                    )
+                    continue
+
+                # Not in unfilled list — only treat as filled if order is old enough
+                # (avoids false positive from KIS API propagation delay)
+                created_at_str = r.get("created_at") or ""
+                try:
+                    created_at = datetime.fromisoformat(created_at_str.replace("Z", "+00:00"))
+                    age_sec = (now - created_at).total_seconds()
+                except (ValueError, TypeError):
+                    continue
+                if age_sec < 300:
+                    continue  # too fresh — may not have appeared in unfilled list yet
 
             logger.info(
                 "order_poll.filled symbol=%s broker_id=%s price=%s qty=%d",
-                symbol, broker_id, price_str, qty,
+                symbol, broker_id or "(fallback)", price_str, qty,
             )
             self._conn.execute(
                 """UPDATE orders SET status='filled', filled_qty=?, avg_fill_price=?, updated_at=?
-                   WHERE broker_order_id=? AND status='open'""",
-                (str(qty), price_str, now, broker_id),
+                   WHERE order_id=? AND status='open'""",
+                (str(qty), price_str, now_iso, order_id),
             )
             self._conn.commit()
             await self._on_sell_filled(symbol, price_str, qty)
