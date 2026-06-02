@@ -247,7 +247,7 @@ class OrderManager:
                         "limit order timeout — retrying as market: %s %s qty=%d",
                         symbol, side, quantity,
                     )
-                    market_order = {**order, "price": None}
+                    market_order = {**order, "price": None, "_limit_price": price}
                     return await self.submit_and_confirm(
                         market_order, timeout_sec=10, _retry=True
                     )
@@ -263,7 +263,7 @@ class OrderManager:
 
         # Auto-register position record if SL/TP provided and this is a buy
         if side == "buy" and order.get("sl"):
-            entry = fill_price or price or 0
+            entry = fill_price or price or order.get("_limit_price") or 0
             submitted["position_id"] = self.register_position(
                 symbol=symbol,
                 quantity=quantity,

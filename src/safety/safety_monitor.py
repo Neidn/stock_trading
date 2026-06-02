@@ -191,8 +191,15 @@ class SafetyMonitor:
                 try:
                     await self._om.create_order(symbol, "sell", half_qty, int(tp1))
                     self._tp1_done.add(position_id)
-                    # Move SL to breakeven (entry price)
-                    self._move_sl_to_breakeven(position_id, pos.get("entry_price", "0"))
+                    # Move SL to breakeven only when entry_price is known
+                    entry_price_str = pos.get("entry_price") or "0"
+                    if float(entry_price_str) > 0:
+                        self._move_sl_to_breakeven(position_id, entry_price_str)
+                    else:
+                        logger.warning(
+                            "tp1.breakeven_skip symbol=%s: entry_price=0, keeping initial SL",
+                            symbol,
+                        )
                 except Exception as exc:  # noqa: BLE001
                     logger.error("tp1.sell_failed symbol=%s: %s", symbol, exc)
 
