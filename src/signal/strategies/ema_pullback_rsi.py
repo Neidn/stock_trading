@@ -47,12 +47,12 @@ class EmaPullbackRsiStrategy(BaseStrategy):
         "ema_mid":       50,
         "ema_slow":      200,
         "rsi_period":    14,
-        "rsi_low":       45.0,
-        "rsi_high":      60.0,
+        "rsi_low":       40.0,
+        "rsi_high":      55.0,
         "adx_period":    14,
-        "adx_threshold": 30.0,
-        "sl_atr_mult":   2.0,
-        "tp1_atr_mult":  2.5,
+        "adx_threshold": 20.0,
+        "sl_atr_mult":   2.5,
+        "tp1_atr_mult":  3.0,
     }
 
     def get_name(self) -> str:
