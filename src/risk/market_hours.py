@@ -101,12 +101,12 @@ def is_market_open(*, buffer_open_sec: int = 0) -> bool:
 
 
 def is_closing_soon(buffer_min: int = 10) -> bool:
-    """Return True if the market closes within *buffer_min* minutes."""
+    """Return True if market closes within *buffer_min* minutes OR is already past close."""
     now = _now_kst()
     if not is_trading_day(now.date()):
         return False
     close_dt = now.replace(hour=_CLOSE_H, minute=_CLOSE_M, second=0, microsecond=0)
-    return datetime.timedelta(0) <= (close_dt - now) <= datetime.timedelta(minutes=buffer_min)
+    return (close_dt - now) <= datetime.timedelta(minutes=buffer_min)
 
 
 def seconds_until_open() -> float:
