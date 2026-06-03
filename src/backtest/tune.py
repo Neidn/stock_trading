@@ -3,9 +3,11 @@
 Precomputes all indicators once on the full dataset, then replays each
 parameter combination in O(n) instead of the O(n²) of the generic engine.
 
+Fetches KRX stock data via yfinance (e.g. '005930.KS' for Samsung Electronics).
+
 Usage:
     python -m src.backtest.tune \\
-        --symbol BTCUSDT \\
+        --symbol 005930.KS \\
         --start 2024-01-01 \\
         --end 2024-12-31 \\
         [--balance 100] \\
@@ -16,8 +18,6 @@ from __future__ import annotations
 
 import argparse
 import logging
-import os
-from datetime import datetime, timezone
 from itertools import product
 from pathlib import Path
 
@@ -367,17 +367,13 @@ def print_grid_results(results: list[dict], top_n: int = 15) -> None:
 # CLI
 # ---------------------------------------------------------------------------
 
-def _parse_date(s: str) -> int:
-    dt = datetime.strptime(s, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-    return int(dt.timestamp() * 1000)
-
-
 def main() -> None:
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(levelname)s - %(message)s")
 
     parser = argparse.ArgumentParser(description="Grid-search ema_pullback_rsi params")
-    parser.add_argument("--symbol",  default="BTCUSDT")
+    parser.add_argument("--symbol",  default="005930.KS",
+                        help="KRX ticker with suffix, e.g. '005930.KS' (default: Samsung)")
     parser.add_argument("--start",   default="2024-01-01")
     parser.add_argument("--end",     default="2024-12-31")
     parser.add_argument("--balance", type=float, default=100.0)
@@ -386,33 +382,26 @@ def main() -> None:
     parser.add_argument("--no-cache", action="store_true")
     args = parser.parse_args()
 
-    since_ms = _parse_date(args.start)
-    until_ms = _parse_date(args.end)
+    since_ms = args.start
+    until_ms = args.end
 
     # Try cache first
-    cache_file = DATA_DIR / f"{args.symbol}_1h_{since_ms}_{until_ms}.csv"
+    cache_file = DATA_DIR / f"{args.symbol.replace('/', '_')}_1h_{args.start}_{args.end}.csv"
     if not args.no_cache and cache_file.exists():
         logger.info("Loading from cache: %s", cache_file.name)
         df = pd.read_csv(cache_file)
     else:
-        import ccxt
-        exchange = ccxt.binanceusdm({"options": {"defaultType": "future"}})
-        logger.info("Fetching %s 1h from Binance...", args.symbol)
-        all_rows: list = []
-        limit = 1000
-        current = since_ms
-        while True:
-            rows = exchange.fetch_ohlcv(args.symbol, "1h", since=current, limit=limit)
-            if not rows:
-                break
-            all_rows.extend(rows)
-            last_ts = rows[-1][0]
-            if last_ts >= until_ms or len(rows) < limit:
-                break
-            current = last_ts + 1
-        df = pd.DataFrame(all_rows, columns=["timestamp", "open", "high", "low", "close", "volume"])
-        df = df[df["timestamp"] <= until_ms].copy()
-        df.reset_index(drop=True, inplace=True)
+        import yfinance as yf
+        ticker = yf.Ticker(args.symbol)
+        df_raw = ticker.history(start=args.start, end=args.end, interval="1h", auto_adjust=True)
+        if df_raw.empty:
+            print("No data returned from yfinance")
+            return
+        df_raw = df_raw.reset_index()
+        date_col = "Datetime" if "Datetime" in df_raw.columns else "Date"
+        df_raw["timestamp"] = pd.to_datetime(df_raw[date_col]).astype("int64") // 10**6
+        df_raw = df_raw.rename(columns={"Open": "open", "High": "high", "Low": "low", "Close": "close", "Volume": "volume"})
+        df = df_raw[["timestamp", "open", "high", "low", "close", "volume"]].reset_index(drop=True)
         DATA_DIR.mkdir(parents=True, exist_ok=True)
         df.to_csv(cache_file, index=False)
         logger.info("Fetched %d candles", len(df))

@@ -42,7 +42,7 @@ class PositionTracker:
     ) -> None:
         """Recalculate and persist unrealized PnL for every open position.
 
-        PnL formula (USDT-M futures, no funding):
+        PnL formula (KRX spot, long-only):
             long:  (current_price - entry_price) * quantity
             short: (entry_price - current_price) * quantity
 

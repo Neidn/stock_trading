@@ -17,114 +17,8 @@ import logging
 import os
 import sqlite3
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    pass
 
 logger = logging.getLogger(__name__)
-
-
-# ---------------------------------------------------------------------------
-# Backfill helpers
-# ---------------------------------------------------------------------------
-
-def _parse_ts_ms(ts_str: str | None) -> int:
-    """Parse ISO datetime string → milliseconds epoch. Default: 24h ago."""
-    if not ts_str:
-        return int(datetime.now(timezone.utc).timestamp() * 1000) - 86_400_000
-    try:
-        dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
-        return int(dt.timestamp() * 1000)
-    except (ValueError, TypeError):
-        return int(datetime.now(timezone.utc).timestamp() * 1000) - 86_400_000
-
-
-def _fetch_realized_pnl(exchange, db_symbol: str, since_ms: int) -> float:
-    """Fetch REALIZED_PNL income events from Binance for *db_symbol* since *since_ms*.
-
-    Uses the raw Binance Futures API endpoint (fapiPrivateGetIncome) because
-    ccxt does not expose fetch_income on binanceusdm.
-    """
-    try:
-        events = exchange.fapiPrivateGetIncome({
-            "incomeType": "REALIZED_PNL",
-            "symbol": db_symbol,
-            "startTime": since_ms,
-            "limit": 100,
-        })
-        return sum(float(e.get("income", 0)) for e in events if e.get("symbol") == db_symbol)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("fapiPrivateGetIncome failed [%s]: %s", db_symbol, exc)
-        return 0.0
-
-
-def backfill_closed_positions(exchange, conn: sqlite3.Connection) -> int:
-    """Fetch realized_pnl from Binance for positions closed without PnL data.
-
-    For each position WHERE status='closed' AND exit_price IS NULL:
-      1. Calls Binance income API for REALIZED_PNL events.
-      2. Derives approximate exit_price from PnL + entry math.
-      3. Updates DB.
-
-    Returns:
-        Number of positions updated.
-    """
-    rows = conn.execute(
-        "SELECT position_id, symbol, side, entry_price, quantity, opened_at, closed_at"
-        " FROM positions WHERE status='closed' AND exit_price IS NULL"
-    ).fetchall()
-
-    if not rows:
-        logger.info("backfill: nothing to update")
-        return 0
-
-    updated = 0
-    for row in rows:
-        if hasattr(row, "keys"):
-            pos_id    = row["position_id"]
-            symbol    = row["symbol"]
-            side      = row["side"]
-            entry_str = row["entry_price"]
-            qty_str   = row["quantity"]
-            closed_at = row["closed_at"]
-        else:
-            pos_id, symbol, side, entry_str, qty_str, _, closed_at = row
-
-        # Fetch since 2h before close to catch the income event
-        since_ms = _parse_ts_ms(closed_at) - 7_200_000
-
-        realized_pnl = _fetch_realized_pnl(exchange, symbol, since_ms)
-
-        exit_price: float | None = None
-        try:
-            entry = float(entry_str or 0)
-            qty   = float(qty_str or 0)
-            if realized_pnl != 0 and qty > 0 and entry > 0:
-                # Derive approximate exit from PnL math
-                if side == "long":
-                    exit_price = entry + realized_pnl / qty
-                else:
-                    exit_price = entry - realized_pnl / qty
-        except (TypeError, ValueError):
-            pass
-
-        if realized_pnl != 0 or exit_price is not None:
-            conn.execute(
-                "UPDATE positions SET exit_price=?, realized_pnl=? WHERE position_id=?",
-                (
-                    str(exit_price) if exit_price is not None else None,
-                    str(realized_pnl),
-                    pos_id,
-                ),
-            )
-            updated += 1
-            logger.info("Backfilled [%s]: exit=%s pnl=%s", symbol, exit_price, realized_pnl)
-
-    if updated:
-        conn.commit()
-
-    return updated
 
 
 # ---------------------------------------------------------------------------
@@ -294,19 +188,6 @@ def main() -> None:
 
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
-
-    import ccxt
-    exchange = ccxt.binanceusdm({
-        "apiKey":  os.environ["BINANCE_API_KEY"],
-        "secret":  os.environ["BINANCE_API_SECRET"],
-        "options": {"defaultType": "future"},
-    })
-    if mode == "testnet":
-        exchange.set_sandbox_mode(True)
-
-    print(f"Backfilling closed positions from Binance...")
-    n = backfill_closed_positions(exchange, conn)
-    print(f"Updated {n} position(s).")
 
     roll_up_daily_performance(conn)
 

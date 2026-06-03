@@ -5,6 +5,8 @@ For each rolling period:
   2. Replay those exact params on TEST_BARS immediately after (out-of-sample).
   3. Step forward by STEP_BARS and repeat.
 
+Fetches KRX stock data via yfinance (e.g. '005930.KS' for Samsung Electronics).
+
 Reports per-period results and aggregate metrics vs the fixed (live) param baseline.
 
 Default window sizes (1h bars):
@@ -15,7 +17,7 @@ Default window sizes (1h bars):
 Usage:
     python -m src.backtest.walk_forward \\
         --strategy ema_crossover \\
-        --symbol BTCUSDT \\
+        --symbol 005930.KS \\
         [--years 2] [--train-bars 2160] [--test-bars 720] [--step-bars 720] \\
         [--balance 100] [--risk-pct 0.01] [--no-cache]
 """
@@ -130,20 +132,22 @@ def run(
 
     Args:
         strategy: One of the strategies supported by tune_strategies.run_grid.
-        symbol: Trading pair, e.g. 'BTCUSDT'.
+        symbol: KRX ticker with suffix, e.g. '005930.KS'.
         years: How many years of 1h data to fetch.
-        initial_balance: Starting balance for each sim window (USDT).
+        initial_balance: Starting balance for each sim window.
         risk_pct: Fraction of balance risked per trade.
         train_bars: In-sample window size (1h bars).
         test_bars: Out-of-sample window size (1h bars).
         step_bars: How far to advance each period.
-        no_cache: Bypass CSV cache and re-fetch from exchange.
+        no_cache: Bypass CSV cache and re-fetch from yfinance.
     """
     from datetime import timedelta
-    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
-    since_ms = now_ms - int(years * 365 * 24 * 3600 * 1000)
+    now = datetime.now(timezone.utc)
+    start_dt = now - timedelta(days=int(years * 365))
+    start_str = start_dt.strftime("%Y-%m-%d")
+    end_str   = now.strftime("%Y-%m-%d")
 
-    df = _load_ohlcv(symbol, since_ms, now_ms, no_cache=no_cache)
+    df = _load_ohlcv(symbol, start_str, end_str, no_cache=no_cache)
     logger.info("Loaded %d candles for %s", len(df), symbol)
 
     param_keys = _STRATEGY_PARAM_KEYS[strategy]
@@ -298,7 +302,8 @@ def main() -> None:
     from src.backtest.tune_strategies import _RUNNERS  # noqa: PLC0415
     parser = argparse.ArgumentParser(description="Walk-forward optimization for active strategies")
     parser.add_argument("--strategy",    required=True, choices=list(_RUNNERS.keys()))
-    parser.add_argument("--symbol",      default="BTCUSDT")
+    parser.add_argument("--symbol",      default="005930.KS",
+                        help="KRX ticker with suffix, e.g. '005930.KS' (default: Samsung)")
     parser.add_argument("--years",       type=float, default=2.0)
     parser.add_argument("--train-bars",  type=int,   default=_DEFAULT_TRAIN)
     parser.add_argument("--test-bars",   type=int,   default=_DEFAULT_TEST)

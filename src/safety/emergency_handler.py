@@ -65,10 +65,10 @@ class EmergencyHandler:
 
         Args:
             reason: Human-readable trigger description.
-            exchange_positions: Optional list of live ccxt position dicts fetched
-                by the caller (SafetyMonitor).  Used as fallback when the local DB
-                has no open rows — handles the case where a position exists on the
-                exchange but was never persisted (or already removed from) the DB.
+            exchange_positions: Optional list of live position dicts fetched by the
+                caller (SafetyMonitor).  Used as fallback when the local DB has no
+                open rows — handles the case where a position exists on the exchange
+                but was never persisted (or already removed from) the DB.
 
         Returns:
             Summary dict::
@@ -127,7 +127,6 @@ class EmergencyHandler:
             qty    = item["qty"]
             pid    = item["pid"]
 
-            # For futures: to close a long send 'sell', short send 'buy'
             close_side = "sell" if side == "long" else "buy"
 
             try:

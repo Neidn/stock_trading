@@ -3,6 +3,8 @@
 Precomputes strategy-independent indicators once, then replays each
 parameter combination in O(n) per combo.
 
+Fetches KRX stock data via yfinance (e.g. '005930.KS' for Samsung Electronics).
+
 Strategies supported:
     ema_crossover       — EMA crossover + ADX filter
     macd_sma200_chartart — SMA-MACD + SMA200 trend filter
@@ -15,7 +17,7 @@ All strategies use 50% close at TP1, remaining 50% at TP2 or SL
 Usage:
     python -m src.backtest.tune_strategies \\
         --strategy ema_crossover \\
-        --symbol BTCUSDT \\
+        --symbol 005930.KS \\
         --start 2020-01-01 \\
         --end 2024-12-31 \\
         [--balance 100] [--risk-pct 0.01] [--top 15] [--no-cache]
@@ -25,8 +27,6 @@ from __future__ import annotations
 
 import argparse
 import logging
-import os
-from datetime import datetime, timezone
 from itertools import product
 from pathlib import Path
 
@@ -45,30 +45,24 @@ TAKER_FEE = 0.0004
 # OHLCV fetch / cache (identical to tune.py)
 # ---------------------------------------------------------------------------
 
-def _load_ohlcv(symbol: str, since_ms: int, until_ms: int, no_cache: bool = False) -> pd.DataFrame:
-    cache_file = DATA_DIR / f"{symbol}_1h_{since_ms}_{until_ms}.csv"
+def _load_ohlcv(symbol: str, start: str, end: str, no_cache: bool = False) -> pd.DataFrame:
+    cache_file = DATA_DIR / f"{symbol.replace('/', '_')}_1h_{start}_{end}.csv"
     if not no_cache and cache_file.exists():
         logger.info("Loading from cache: %s", cache_file.name)
         return pd.read_csv(cache_file)
 
-    import ccxt
-    exchange = ccxt.binanceusdm({"options": {"defaultType": "future"}})
-    logger.info("Fetching %s 1h from Binance...", symbol)
-    all_rows: list = []
-    limit = 1000
-    current = since_ms
-    while True:
-        rows = exchange.fetch_ohlcv(symbol, "1h", since=current, limit=limit)
-        if not rows:
-            break
-        all_rows.extend(rows)
-        last_ts = rows[-1][0]
-        if last_ts >= until_ms or len(rows) < limit:
-            break
-        current = last_ts + 1
-    df = pd.DataFrame(all_rows, columns=["timestamp", "open", "high", "low", "close", "volume"])
-    df = df[df["timestamp"] <= until_ms].copy()
-    df.reset_index(drop=True, inplace=True)
+    import yfinance as yf
+    logger.info("Fetching %s 1h from yfinance...", symbol)
+    ticker = yf.Ticker(symbol)
+    df_raw = ticker.history(start=start, end=end, interval="1h", auto_adjust=True)
+    if df_raw.empty:
+        logger.warning("No data returned from yfinance for %s", symbol)
+        return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"])
+    df_raw = df_raw.reset_index()
+    date_col = "Datetime" if "Datetime" in df_raw.columns else "Date"
+    df_raw["timestamp"] = pd.to_datetime(df_raw[date_col]).astype("int64") // 10**6
+    df_raw = df_raw.rename(columns={"Open": "open", "High": "high", "Low": "low", "Close": "close", "Volume": "volume"})
+    df = df_raw[["timestamp", "open", "high", "low", "close", "volume"]].reset_index(drop=True)
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     df.to_csv(cache_file, index=False)
     logger.info("Fetched %d candles", len(df))
@@ -761,17 +755,13 @@ def find_params_in_results(results: list[dict], params: dict, param_keys: list[s
 # ---------------------------------------------------------------------------
 
 
-def _parse_date(s: str) -> int:
-    dt = datetime.strptime(s, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-    return int(dt.timestamp() * 1000)
-
-
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s - %(message)s")
 
     parser = argparse.ArgumentParser(description="Grid-search params for active strategies")
     parser.add_argument("--strategy", required=True, choices=list(_RUNNERS.keys()))
-    parser.add_argument("--symbol",   default="BTCUSDT")
+    parser.add_argument("--symbol",   default="005930.KS",
+                        help="KRX ticker with suffix, e.g. '005930.KS' (default: Samsung)")
     parser.add_argument("--start",    default="2020-01-01")
     parser.add_argument("--end",      default="2024-12-31")
     parser.add_argument("--balance",  type=float, default=100.0)
@@ -780,10 +770,7 @@ def main() -> None:
     parser.add_argument("--no-cache", action="store_true")
     args = parser.parse_args()
 
-    since_ms = _parse_date(args.start)
-    until_ms = _parse_date(args.end)
-
-    df = _load_ohlcv(args.symbol, since_ms, until_ms, no_cache=args.no_cache)
+    df = _load_ohlcv(args.symbol, args.start, args.end, no_cache=args.no_cache)
     logger.info("Loaded %d candles for %s", len(df), args.symbol)
 
     runner = _RUNNERS[args.strategy]

@@ -1,22 +1,23 @@
 """Backtesting engine — replay historical OHLCV against any BaseStrategy.
 
+Fetches KRX stock data via yfinance (e.g. '005930.KS' for Samsung Electronics).
+
 Simulation rules:
   - Signal generated on candle i close → entry at candle i+1 open.
   - SL/TP checked each subsequent candle using candle high/low.
   - If both SL and TP hit in same candle → SL assumed first (conservative).
   - Reversal signal (opposite direction) → close at next open, enter immediately.
-  - Fee: 0.04% taker on entry notional + exit notional.
-  - One position per symbol at a time.
+  - Fee: 0.2% round-trip (KRX brokerage + transaction tax).
+  - One position per symbol at a time (spot only, long-only).
 
 Usage:
     python -m src.backtest.engine \\
         --strategy ema_crossover \\
-        --symbol BTCUSDT \\
+        --symbol 005930.KS \\
         --start 2024-01-01 \\
         --end 2024-12-31 \\
         [--balance 100] \\
         [--risk-pct 0.01] \\
-        [--testnet] \\
         [--save-trades trades.csv] \\
         [--compare]          # run all strategies, print comparison table
 """
@@ -28,7 +29,6 @@ import csv
 import importlib
 import logging
 import math
-import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -42,10 +42,7 @@ from src.signal.indicators import calc_atr
 
 logger = logging.getLogger(__name__)
 
-TAKER_FEE = 0.0004              # 0.04% Binance futures taker
-FUNDING_RATE = 0.0001           # 0.01%/8h typical BTC perp rate
-FUNDING_INTERVAL_MS = 8 * 3600 * 1000  # 8 hours in milliseconds
-MAINTENANCE_MARGIN_RATE = 0.005  # 0.5% Binance BTC-USDT bracket 1
+TAKER_FEE = 0.002               # 0.2% round trip (KRX brokerage + transaction tax)
 DATA_DIR = Path(__file__).parent.parent.parent / "data" / "backtest"
 
 _ALL_STRATEGIES = [
@@ -93,7 +90,6 @@ class BacktestResult:
     end_ts: int
     initial_balance: float
     final_balance: float
-    leverage: int = 1
     trades: list[Trade] = field(default_factory=list)
 
     @property
@@ -186,14 +182,14 @@ class BacktestResult:
 # ---------------------------------------------------------------------------
 
 class BacktestEngine:
-    """Simulate a BaseStrategy on historical OHLCV data.
+    """Simulate a BaseStrategy on historical OHLCV data (KRX spot, long-only).
 
     Args:
         strategy:        Instantiated BaseStrategy subclass.
-        symbol:          Trading pair, e.g. 'BTCUSDT'.
-        initial_balance: Starting USDT balance. Default 100.0.
+        symbol:          KRX ticker with suffix, e.g. '005930.KS'.
+        initial_balance: Starting balance. Default 100.0.
         risk_pct:        Fraction of balance to risk per trade. Default 0.01 (1%).
-        taker_fee:       Fee rate per side. Default 0.0004 (0.04%).
+        taker_fee:       Fee rate (round-trip). Default 0.002 (0.2% KRX).
     """
 
     def __init__(
@@ -203,14 +199,12 @@ class BacktestEngine:
         initial_balance: float = 100.0,
         risk_pct: float = 0.01,
         taker_fee: float = TAKER_FEE,
-        leverage: int = 1,
     ) -> None:
         self._strategy = strategy
         self._symbol = symbol
         self._initial_balance = initial_balance
         self._risk_pct = risk_pct
         self._taker_fee = taker_fee
-        self._leverage = max(1, int(leverage))
 
     # ------------------------------------------------------------------
     # Data fetching
@@ -218,43 +212,35 @@ class BacktestEngine:
 
     def fetch_ohlcv(
         self,
-        exchange,
         timeframe: str,
-        since_ms: int,
-        until_ms: int,
+        start: str,
+        end: str,
         use_cache: bool = True,
     ) -> pd.DataFrame:
-        """Fetch OHLCV candles, using local CSV cache when available."""
-        cache_file = DATA_DIR / f"{self._symbol}_{timeframe}_{since_ms}_{until_ms}.csv"
+        """Fetch OHLCV candles via yfinance, using local CSV cache when available."""
+        import yfinance as yf
+        symbol = self._symbol
+        cache_file = DATA_DIR / f"{symbol.replace('/', '_')}_{timeframe}_{start}_{end}.csv"
         DATA_DIR.mkdir(parents=True, exist_ok=True)
 
         if use_cache and cache_file.exists():
             logger.info("Loading from cache: %s", cache_file.name)
-            df = pd.read_csv(cache_file)
-            return df
+            return pd.read_csv(cache_file)
 
-        logger.info("Fetching %s %s from Binance...", self._symbol, timeframe)
-        all_rows: list = []
-        limit = 1000  # Binance hard cap per request
-        current = since_ms
-        while True:
-            rows = exchange.fetch_ohlcv(self._symbol, timeframe, since=current, limit=limit)
-            if not rows:
-                break
-            all_rows.extend(rows)
-            last_ts = rows[-1][0]
-            if last_ts >= until_ms:
-                break
-            if len(rows) < limit:  # genuine end of available data
-                break
-            current = last_ts + 1
-
-        df = pd.DataFrame(
-            all_rows,
-            columns=["timestamp", "open", "high", "low", "close", "volume"],
-        )
-        df = df[df["timestamp"] <= until_ms].copy()
-        df.reset_index(drop=True, inplace=True)
+        logger.info("Fetching %s %s from yfinance...", symbol, timeframe)
+        ticker = yf.Ticker(symbol)
+        df_raw = ticker.history(start=start, end=end, interval=timeframe, auto_adjust=True)
+        if df_raw.empty:
+            logger.warning("No data returned for %s %s %s→%s", symbol, timeframe, start, end)
+            return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"])
+        df_raw = df_raw.reset_index()
+        date_col = "Datetime" if "Datetime" in df_raw.columns else "Date"
+        df_raw["timestamp"] = pd.to_datetime(df_raw[date_col]).astype("int64") // 10**6
+        df_raw = df_raw.rename(columns={
+            "Open": "open", "High": "high", "Low": "low",
+            "Close": "close", "Volume": "volume",
+        })
+        df = df_raw[["timestamp", "open", "high", "low", "close", "volume"]].reset_index(drop=True)
         df.to_csv(cache_file, index=False)
         logger.info("Fetched %d candles, cached to %s", len(df), cache_file.name)
         return df
@@ -276,20 +262,8 @@ class BacktestEngine:
 
         for i in range(min_candles, n):
             candle = df.iloc[i]
-            candle_ts = int(candle["timestamp"])
 
-            # --- 0. Apply funding fee for leveraged positions ---
-            if open_pos is not None and self._leverage > 1:
-                last_fund_ts = open_pos["last_funding_ts"]
-                while candle_ts - last_fund_ts >= FUNDING_INTERVAL_MS:
-                    notional = open_pos["qty"] * open_pos["entry_price"]
-                    fee = notional * FUNDING_RATE
-                    open_pos["accumulated_funding"] += fee
-                    balance -= fee
-                    last_fund_ts += FUNDING_INTERVAL_MS
-                open_pos["last_funding_ts"] = last_fund_ts
-
-            # --- 1. Check SL/TP/liquidation on current candle ---
+            # --- 1. Check SL/TP on current candle ---
             if open_pos is not None:
                 exit_info = self._check_sl_tp(candle, open_pos)
                 if exit_info:
@@ -368,16 +342,6 @@ class BacktestEngine:
                     sl = entry_price + sl_dist
                     tp1 = entry_price - tp1_dist
 
-                # Liquidation price (isolated margin model)
-                mmr = MAINTENANCE_MARGIN_RATE
-                if self._leverage > 1:
-                    if new_side == "long":
-                        liq_price = entry_price * (1 - (1 - mmr) / self._leverage)
-                    else:
-                        liq_price = entry_price * (1 + (1 - mmr) / self._leverage)
-                else:
-                    liq_price = 0.0
-
                 open_pos = {
                     "side": new_side,
                     "entry_price": entry_price,
@@ -387,9 +351,7 @@ class BacktestEngine:
                     "entry_fee": entry_fee,
                     "entry_bar": i + 1,
                     "entry_ts": entry_ts,
-                    "liq_price": liq_price,
                     "accumulated_funding": 0.0,
-                    "last_funding_ts": entry_ts,
                 }
 
         # --- 5. Close any remaining position at end of data ---
@@ -411,7 +373,6 @@ class BacktestEngine:
             end_ts=int(df.iloc[-1]["timestamp"]),
             initial_balance=self._initial_balance,
             final_balance=balance,
-            leverage=self._leverage,
             trades=trades,
         )
 
@@ -423,15 +384,8 @@ class BacktestEngine:
         side = pos["side"]
         sl = pos["sl"]
         tp1 = pos["tp1"]
-        liq = pos.get("liq_price", 0.0)
         high = float(candle["high"])
         low = float(candle["low"])
-
-        # Liquidation checked first — worse than SL for account
-        if liq > 0:
-            liq_hit = (side == "long" and low <= liq) or (side == "short" and high >= liq)
-            if liq_hit:
-                return {"price": liq, "reason": "liquidated"}
 
         sl_hit = (side == "long" and low <= sl) or (side == "short" and high >= sl)
         tp_hit = (side == "long" and high >= tp1) or (side == "short" and low <= tp1)
@@ -499,10 +453,9 @@ def print_report(result: BacktestResult) -> None:
     pf_str = f"{pf:.2f}" if pf != float("inf") else "∞"
     start = _ts_to_str(result.start_ts)
     end = _ts_to_str(result.end_ts)
-    lev_str = f"{result.leverage}x" if result.leverage > 1 else "spot"
 
     print(f"\n{'='*52}")
-    print(f"  Backtest: {result.strategy} | {result.symbol} | {lev_str}")
+    print(f"  Backtest: {result.strategy} | {result.symbol} | spot")
     print(f"  Period:   {start} → {end}  ({result.timeframe})")
     print(f"{'='*52}")
     print(f"  Trades:          {result.total_trades}")
@@ -512,19 +465,16 @@ def print_report(result: BacktestResult) -> None:
         return
     print(f"  Win rate:        {result.win_rate:.1%}  ({result.winning_trades}W / {result.losing_trades}L)")
     print(f"  Profit factor:   {pf_str}")
-    print(f"  Net PnL:         {result.net_pnl:+.4f} USDT  ({result.return_pct:+.2f}%)")
-    print(f"  Gross profit:    {result.gross_profit:.4f} USDT")
-    print(f"  Gross loss:      {result.gross_loss:.4f} USDT")
-    print(f"  Avg PnL/trade:   {result.avg_pnl:+.4f} USDT")
-    print(f"  Best trade:      {result.best_trade:+.4f} USDT")
-    print(f"  Worst trade:     {result.worst_trade:+.4f} USDT")
+    print(f"  Net PnL:         {result.net_pnl:+.4f}  ({result.return_pct:+.2f}%)")
+    print(f"  Gross profit:    {result.gross_profit:.4f}")
+    print(f"  Gross loss:      {result.gross_loss:.4f}")
+    print(f"  Avg PnL/trade:   {result.avg_pnl:+.4f}")
+    print(f"  Best trade:      {result.best_trade:+.4f}")
+    print(f"  Worst trade:     {result.worst_trade:+.4f}")
     print(f"  Max drawdown:    {result.max_drawdown_pct:.2f}%")
     print(f"  Avg bars held:   {result.avg_bars_held:.1f}")
-    print(f"  Balance:         {result.initial_balance:.2f} → {result.final_balance:.4f} USDT")
+    print(f"  Balance:         {result.initial_balance:.2f} → {result.final_balance:.4f}")
     print(f"  Exit reasons:    {result.close_reason_counts}")
-    if result.leverage > 1:
-        print(f"  Liquidations:    {result.total_liquidations}")
-        print(f"  Funding paid:    {result.total_funding_paid:.4f} USDT")
     print(f"{'='*52}\n")
 
 
@@ -609,48 +559,30 @@ def _load_strategy(name: str, params: dict | None = None) -> Optional[BaseStrate
 # CLI
 # ---------------------------------------------------------------------------
 
-def _parse_date(s: str) -> int:
-    """Parse YYYY-MM-DD → UTC midnight milliseconds."""
-    dt = datetime.strptime(s, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-    return int(dt.timestamp() * 1000)
-
-
 def main() -> None:
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s - %(message)s",
     )
 
-    parser = argparse.ArgumentParser(description="Backtest a strategy on historical data")
+    parser = argparse.ArgumentParser(description="Backtest a strategy on KRX historical data")
     parser.add_argument("--strategy", default="ema_crossover",
                         help="Strategy name (default: ema_crossover)")
-    parser.add_argument("--symbol", default="BTCUSDT")
+    parser.add_argument("--symbol", default="005930.KS",
+                        help="KRX ticker with suffix, e.g. '005930.KS' (default: Samsung)")
     parser.add_argument("--start", default="2024-01-01", help="Start date YYYY-MM-DD")
     parser.add_argument("--end", default="2024-12-31", help="End date YYYY-MM-DD")
     parser.add_argument("--balance", type=float, default=100.0,
-                        help="Initial balance USDT (default 100)")
+                        help="Initial balance (default 100)")
     parser.add_argument("--risk-pct", type=float, default=0.01,
                         help="Risk per trade fraction (default 0.01 = 1%%)")
-    parser.add_argument("--testnet", action="store_true")
     parser.add_argument("--save-trades", metavar="FILE",
                         help="Save trade log to CSV file")
     parser.add_argument("--compare", action="store_true",
                         help="Run ALL strategies and print comparison table")
     parser.add_argument("--no-cache", action="store_true",
-                        help="Ignore local OHLCV cache, re-fetch from Binance")
-    parser.add_argument("--leverage", type=int, default=1,
-                        help="Leverage multiplier (default 1 = spot/no leverage). "
-                             "Enables liquidation price + funding fee simulation.")
+                        help="Ignore local OHLCV cache, re-fetch from yfinance")
     args = parser.parse_args()
-
-    import ccxt
-    # fetch_ohlcv is a public endpoint — no auth needed for backtesting
-    exchange = ccxt.binanceusdm({"options": {"defaultType": "future"}})
-    if args.testnet:
-        exchange.set_sandbox_mode(True)
-
-    since_ms = _parse_date(args.start)
-    until_ms = _parse_date(args.end)
 
     if args.compare:
         results: list[BacktestResult] = []
@@ -663,11 +595,10 @@ def main() -> None:
                 symbol=args.symbol,
                 initial_balance=args.balance,
                 risk_pct=args.risk_pct,
-                leverage=args.leverage,
             )
             timeframe = strategy.get_timeframe()
             try:
-                df = engine.fetch_ohlcv(exchange, timeframe, since_ms, until_ms,
+                df = engine.fetch_ohlcv(timeframe, args.start, args.end,
                                         use_cache=not args.no_cache)
                 if len(df) < strategy.get_min_candles() + 2:
                     logger.warning("%s: insufficient data (%d candles)", strat_name, len(df))
@@ -692,10 +623,9 @@ def main() -> None:
         symbol=args.symbol,
         initial_balance=args.balance,
         risk_pct=args.risk_pct,
-        leverage=args.leverage,
     )
     timeframe = strategy.get_timeframe()
-    df = engine.fetch_ohlcv(exchange, timeframe, since_ms, until_ms,
+    df = engine.fetch_ohlcv(timeframe, args.start, args.end,
                              use_cache=not args.no_cache)
 
     if len(df) < strategy.get_min_candles() + 2:

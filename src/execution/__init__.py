@@ -1,1 +1,1 @@
-"""Order execution and position tracking via ccxt."""
+"""Order execution and position tracking via KIS API."""

@@ -1,15 +1,16 @@
 """Monthly backtest report — all active strategies vs their best params.
 
-For each strategy, fetches last 12 months of OHLCV for the reference symbol,
-runs a full grid search, simulates current live params, and sends a combined
-comparison report via Telegram. Human decides whether to apply changes.
+For each strategy, fetches last 12 months of OHLCV for the reference symbol
+via yfinance (KRX .KS symbols), runs a full grid search, simulates current
+live params, and sends a combined comparison report via Telegram. Human
+decides whether to apply changes.
 
 Strategy → Reference Symbol (regime-matched):
-    ema_pullback_rsi     → BTCUSDT  (strong trend, ADX ~38)
-    ema_crossover        → ETHUSDT  (trending, diverse)
-    macd_sma200_chartart → SOLUSDT  (strong sustained trend, ADX ~55)
-    rsi_supertrend       → BNBUSDT  (transitioning/ranging, ADX ~28)
-    supertrend           → SOLUSDT  (volatile + trending, ADX ~35)
+    ema_pullback_rsi     → 005930.KS  (Samsung Electronics)
+    ema_crossover        → 000660.KS  (SK Hynix)
+    macd_sma200_chartart → 035420.KS  (Naver)
+    rsi_supertrend       → 051910.KS  (LG Chem)
+    supertrend           → 005380.KS  (Hyundai Motor)
 
 Run:
     python -m src.jobs.backtest_report
@@ -23,7 +24,6 @@ import logging
 import os
 from datetime import datetime, timedelta, timezone
 
-import ccxt
 import pandas as pd
 
 from src.backtest.tune import GRID as EPR_GRID, _precompute, _simulate, run_grid as epr_run_grid
@@ -51,18 +51,18 @@ RISK_PCT            = 0.01
 STRATEGY_CONFIGS = [
     {
         "name":       "ema_pullback_rsi",
-        "symbol":     "BTCUSDT",
+        "symbol":     "005930.KS",   # Samsung Electronics
         "env_key":    "STRATEGY_PARAMS_EMA_PULLBACK_RSI",
-        "param_keys": ["adx_threshold", "rsi_low", "rsi_high", "sl_atr_mult", "tp1_atr_mult", "tp2_atr_mult"],
+        "param_keys": ["adx_threshold", "rsi_low", "rsi_high", "sl_atr_mult", "tp1_atr_mult"],
         "defaults":   {
-            "adx_threshold": 30.0, "rsi_low": 45.0, "rsi_high": 55.0,
-            "sl_atr_mult": 2.0, "tp1_atr_mult": 4.0, "tp2_atr_mult": 6.0,
+            "adx_threshold": 30.0, "rsi_low": 45.0, "rsi_high": 60.0,
+            "sl_atr_mult": 2.0, "tp1_atr_mult": 2.5,
         },
-        "engine": "epr",   # uses tune.py
+        "engine": "epr",
     },
     {
         "name":       "ema_crossover",
-        "symbol":     "ETHUSDT",
+        "symbol":     "000660.KS",   # SK Hynix
         "env_key":    "STRATEGY_PARAMS_EMA_CROSSOVER",
         "param_keys": _STRATEGY_PARAM_KEYS["ema_crossover"],
         "defaults":   {"adx_threshold": 30.0, "sl_atr_mult": 2.0, "tp1_atr_mult": 2.5, "tp2_atr_mult": 6.0},
@@ -70,7 +70,7 @@ STRATEGY_CONFIGS = [
     },
     {
         "name":       "macd_sma200_chartart",
-        "symbol":     "SOLUSDT",
+        "symbol":     "035420.KS",   # Naver
         "env_key":    "STRATEGY_PARAMS_MACD_SMA200_CHARTART",
         "param_keys": _STRATEGY_PARAM_KEYS["macd_sma200_chartart"],
         "defaults":   {"sl_atr_mult": 1.5, "tp1_atr_mult": 3.0, "tp2_atr_mult": 6.0},
@@ -78,7 +78,7 @@ STRATEGY_CONFIGS = [
     },
     {
         "name":       "rsi_supertrend",
-        "symbol":     "BNBUSDT",
+        "symbol":     "051910.KS",   # LG Chem
         "env_key":    "STRATEGY_PARAMS_RSI_SUPERTREND",
         "param_keys": _STRATEGY_PARAM_KEYS["rsi_supertrend"],
         "defaults":   {"multiplier": 2.0, "rsi_threshold": 55.0, "sl_atr_mult": 2.5, "tp1_atr_mult": 4.0, "tp2_atr_mult": 6.0},
@@ -86,7 +86,7 @@ STRATEGY_CONFIGS = [
     },
     {
         "name":       "supertrend",
-        "symbol":     "SOLUSDT",
+        "symbol":     "005380.KS",   # Hyundai Motor
         "env_key":    "STRATEGY_PARAMS_SUPERTREND",
         "param_keys": _STRATEGY_PARAM_KEYS["supertrend"],
         "defaults":   {"multiplier": 4.0, "sl_atr_mult": 2.5, "tp1_atr_mult": 3.0, "tp2_atr_mult": 6.0},
@@ -99,24 +99,24 @@ STRATEGY_CONFIGS = [
 # OHLCV fetch
 # ---------------------------------------------------------------------------
 
-def _fetch_ohlcv(symbol: str, since_ms: int, until_ms: int) -> pd.DataFrame:
-    exchange = ccxt.binanceusdm({"options": {"defaultType": "future"}})
-    all_rows: list = []
-    limit = 1000
-    current = since_ms
-    while True:
-        rows = exchange.fetch_ohlcv(symbol, "1h", since=current, limit=limit)
-        if not rows:
-            break
-        all_rows.extend(rows)
-        last_ts = rows[-1][0]
-        if last_ts >= until_ms or len(rows) < limit:
-            break
-        current = last_ts + 1
-    df = pd.DataFrame(all_rows, columns=["timestamp", "open", "high", "low", "close", "volume"])
-    df = df[df["timestamp"] <= until_ms].copy()
-    df.reset_index(drop=True, inplace=True)
-    return df
+def _fetch_ohlcv(symbol: str, since_ms: int, until_ms: int, interval: str = "1h") -> pd.DataFrame:
+    """Fetch OHLCV for a KRX symbol via yfinance. Symbol must include suffix, e.g. '005930.KS'."""
+    import yfinance as yf
+    from datetime import datetime, timezone
+    start = datetime.fromtimestamp(since_ms / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
+    end   = datetime.fromtimestamp(until_ms / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
+    ticker = yf.Ticker(symbol)
+    df_raw = ticker.history(start=start, end=end, interval=interval, auto_adjust=True)
+    if df_raw.empty:
+        return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"])
+    df_raw = df_raw.reset_index()
+    date_col = "Datetime" if "Datetime" in df_raw.columns else "Date"
+    df_raw["timestamp"] = pd.to_datetime(df_raw[date_col]).astype("int64") // 10**6
+    df_raw = df_raw.rename(columns={
+        "Open": "open", "High": "high", "Low": "low",
+        "Close": "close", "Volume": "volume",
+    })
+    return df_raw[["timestamp", "open", "high", "low", "close", "volume"]].reset_index(drop=True)
 
 
 # ---------------------------------------------------------------------------
@@ -149,7 +149,7 @@ def _run_epr(df: pd.DataFrame, current_params: dict) -> tuple[dict, dict]:
         rsi_high=current_params["rsi_high"],
         sl_atr_mult=current_params["sl_atr_mult"],
         tp1_atr_mult=current_params["tp1_atr_mult"],
-        tp2_atr_mult=current_params["tp2_atr_mult"],
+        tp2_atr_mult=current_params.get("tp2_atr_mult", 6.0),
         initial_balance=INITIAL_BALANCE,
         risk_pct=RISK_PCT,
     )
