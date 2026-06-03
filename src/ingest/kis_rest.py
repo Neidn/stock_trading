@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import sqlite3
 import time
 from collections import deque
 from datetime import datetime, timedelta, timezone
@@ -109,7 +110,7 @@ class KISRestClient:
     TRADING_MODE using the order credentials.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, db_path: str | None = None) -> None:
         mode = os.getenv("TRADING_MODE", "paper").strip().lower()
         self._paper = mode != "live"
         self._base = _PAPER_BASE if self._paper else _LIVE_BASE
@@ -148,6 +149,9 @@ class KISRestClient:
         self._session: aiohttp.ClientSession | None = None
         self._last_req_at: float = 0.0
 
+        # SQLite path for token persistence (survives pod restarts)
+        self._db_path: str | None = db_path or os.getenv("SQLITE_DB_PATH")
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
@@ -174,11 +178,49 @@ class KISRestClient:
     # Auth
     # ------------------------------------------------------------------
 
+    def _db_load_token(self, key_id: str) -> tuple[str, float] | None:
+        """Load a token from SQLite. Returns (access_token, expires_at) or None."""
+        if not self._db_path:
+            return None
+        try:
+            conn = sqlite3.connect(self._db_path)
+            row = conn.execute(
+                "SELECT access_token, expires_at FROM api_tokens WHERE key_id = ?",
+                (key_id,),
+            ).fetchone()
+            conn.close()
+            if row and float(row[1]) > time.time() + _TOKEN_BUFFER_SEC:
+                return row[0], float(row[1])
+        except Exception as exc:
+            logger.debug("token.db_load_failed key=%s: %s", key_id, exc)
+        return None
+
+    def _db_save_token(self, key_id: str, access_token: str, expires_at: float) -> None:
+        """Persist a token to SQLite for cross-restart reuse."""
+        if not self._db_path:
+            return
+        try:
+            conn = sqlite3.connect(self._db_path)
+            conn.execute(
+                "INSERT OR REPLACE INTO api_tokens (key_id, access_token, expires_at) VALUES (?,?,?)",
+                (key_id, access_token, expires_at),
+            )
+            conn.commit()
+            conn.close()
+        except Exception as exc:
+            logger.debug("token.db_save_failed key=%s: %s", key_id, exc)
+
     async def _ensure_token(self) -> str:
         if self._token and time.time() < self._token_expires_at - _TOKEN_BUFFER_SEC:
             return self._token
         async with self._token_lock:
             if self._token and time.time() < self._token_expires_at - _TOKEN_BUFFER_SEC:
+                return self._token
+            # Try loading from DB before hitting KIS API
+            cached = self._db_load_token("order")
+            if cached:
+                self._token, self._token_expires_at = cached
+                logger.info("kis.token.loaded_from_db")
                 return self._token
             await self._fetch_token()
         assert self._token
@@ -202,6 +244,7 @@ class KISRestClient:
 
         self._token = data["access_token"]
         self._token_expires_at = time.time() + data.get("expires_in", 86400)
+        self._db_save_token("order", self._token, self._token_expires_at)
         logger.info("kis.token.ok expires_in=%s", data.get("expires_in"))
 
     async def _ensure_data_token(self) -> str:
@@ -209,6 +252,12 @@ class KISRestClient:
             return self._data_token
         async with self._data_token_lock:
             if self._data_token and time.time() < self._data_token_expires_at - _TOKEN_BUFFER_SEC:
+                return self._data_token
+            # Try loading from DB before hitting KIS API
+            cached = self._db_load_token("data")
+            if cached:
+                self._data_token, self._data_token_expires_at = cached
+                logger.info("kis.data_token.loaded_from_db")
                 return self._data_token
             await self._fetch_data_token()
         assert self._data_token
@@ -231,6 +280,7 @@ class KISRestClient:
             data = await resp.json(content_type=None)
         self._data_token = data["access_token"]
         self._data_token_expires_at = time.time() + data.get("expires_in", 86400)
+        self._db_save_token("data", self._data_token, self._data_token_expires_at)
         logger.info("kis.data_token.ok expires_in=%s", data.get("expires_in"))
 
     # ------------------------------------------------------------------
